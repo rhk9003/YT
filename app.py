@@ -1,214 +1,111 @@
 import streamlit as st
 import google.generativeai as genai
-from youtube_search import YoutubeSearch
-# 修改點：改用標準的從模組匯入類別的方式，解決 Attribute Error
-from youtube_transcript_api import YouTubeTranscriptApi
-import urllib.parse
-import json
 
 # 設定頁面配置
-st.set_page_config(page_title="YouTube 內容策略分析戰情室", layout="wide")
+st.set_page_config(page_title="YouTube 內容策略分析 (AI 全託管版)", page_icon="🤖", layout="wide")
 
 # --- 側邊欄：設定 ---
 st.sidebar.title("🔧 系統設定")
 api_key = st.sidebar.text_input("輸入 Google Gemini API Key", type="password")
-model_name = st.sidebar.text_input("模型名稱", value="gemini-1.5-pro", help="請輸入您想使用的模型版本，如 gemini-1.5-pro 或 gemini-3-pro")
+model_name = st.sidebar.text_input("模型名稱", value="gemini-1.5-pro", help="建議使用 gemini-1.5-pro 或更強的模型，以獲得較好的聯網搜尋能力")
 
 # 初始化 Gemini
 if api_key:
     genai.configure(api_key=api_key)
 
-# --- 工具函式 ---
-
-def get_video_id(url):
-    """從 YouTube 網址提取 Video ID"""
+def ask_gemini(prompt, model_ver):
+    """將任務完全交給 Gemini 處理"""
     try:
-        query = urllib.parse.urlparse(url)
-        if query.hostname == 'youtu.be':
-            return query.path[1:]
-        if query.hostname in ('www.youtube.com', 'youtube.com'):
-            if query.path == '/watch':
-                p = urllib.parse.parse_qs(query.query)
-                return p['v'][0]
-            if query.path[:7] == '/embed/':
-                return query.path.split('/')[2]
-            if query.path[:3] == '/v/':
-                return query.path.split('/')[2]
-    except:
-        return None
-    return None
-
-def search_youtube_videos(keywords, max_results=5):
-    """搜尋 YouTube 並返回前幾名結果 (使用 youtube-search)"""
-    try:
-        results = YoutubeSearch(keywords, max_results=max_results).to_dict()
+        # 設定工具：嘗試啟用 Google Search (如果模型支援)
+        tools = [
+            {"google_search": {}}
+        ]
         
-        processed_results = []
-        for video in results:
-            url = f"https://www.youtube.com/watch?v={video['id']}"
-            processed_results.append({
-                "title": video['title'],
-                "link": url,
-                "id": video['id'],
-                "views": video.get('views', 'N/A')
-            })
-        return processed_results
-    except Exception as e:
-        st.error(f"搜尋發生錯誤: {e}")
-        return []
-
-def get_video_transcript(video_id):
-    """獲取影片字幕"""
-    try:
-        # 修改點：直接調用導入的類別方法
-        transcript_list = YouTubeTranscriptApi.get_transcript(
-            video_id, 
-            languages=['zh-TW', 'zh-CN', 'en']
-        )
-        text = " ".join([t['text'] for t in transcript_list])
-        return text
-    except Exception as e:
-        error_msg = str(e)
-        if "Subtitles are disabled" in error_msg:
-            return "錯誤：該影片未提供字幕 (CC) 或字幕被停用。"
-        elif "No transcripts were found" in error_msg:
-            return "錯誤：找不到支援語言的字幕 (僅支援繁中/簡中/英文)。"
-        elif "Could not retrieve a transcript" in error_msg:
-             return "錯誤：無法檢索字幕，可能影片不允許或有地區限制。"
-        return f"無法獲取字幕: {error_msg}"
-
-def analyze_with_gemini(prompt, model_ver):
-    """呼叫 Gemini API 進行分析"""
-    try:
-        model = genai.GenerativeModel(model_ver)
+        # 初始化模型
+        model = genai.GenerativeModel(model_ver, tools=tools)
+        
+        # 生成內容
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return f"API 呼叫錯誤: {str(e)}"
+        return f"AI 思考時發生錯誤 (可能是 API Key 問題或模型不支援搜尋): {str(e)}"
 
 # --- 主介面 ---
-
-st.title("📊 YouTube 內容策略分析戰情室")
+st.title("🤖 YouTube 內容策略分析 (AI 全託管版)")
+st.caption("本版本捨棄傳統爬蟲程式，改由 Gemini 直接聯網搜尋與分析，穩定性更高。")
 st.markdown("---")
 
 # 狀態管理
-if 'search_results' not in st.session_state:
-    st.session_state.search_results = []
-if 'analysis_step1' not in st.session_state:
-    st.session_state.analysis_step1 = ""
+if 'step1_result' not in st.session_state:
+    st.session_state.step1_result = ""
 
 # === 第一階段：關鍵字搜索與市場意圖分析 ===
-st.header("第一階段：關鍵字搜索與意圖偵察")
+st.header("第一階段：關鍵字搜尋與意圖偵察")
 
 keywords = st.text_input("輸入目標關鍵字 (例如：『生產力工具』、『AI 繪圖教學』)")
 
-if st.button("🚀 啟動偵察", key="search_btn"):
+if st.button("🚀 呼叫 AI 進行搜尋與分析", key="search_btn"):
     if not api_key:
         st.error("請先在側邊欄輸入 API Key")
     elif not keywords:
         st.warning("請輸入關鍵字")
     else:
-        with st.spinner(f"正在分析 YouTube 戰場：{keywords}..."):
-            # 1. 爬取 YouTube 搜尋結果
-            st.session_state.search_results = search_youtube_videos(keywords)
+        with st.spinner(f"Gemini 正在網路上搜尋 '{keywords}' 的相關影片並進行分析..."):
             
-            if st.session_state.search_results:
-                # 顯示結果
-                st.subheader(f"🔍 '{keywords}' 搜尋排名 Top 5")
-                for idx, vid in enumerate(st.session_state.search_results):
-                    st.markdown(f"**{idx+1}. [{vid['title']}]({vid['link']})** (觀看數: {vid['views']})")
-                
-                # 2. Gemini 意圖分析
-                search_data_str = "\n".join([f"{i+1}. {v['title']}" for i, v in enumerate(st.session_state.search_results)])
-                
-                prompt_intent = f"""
-                你是一位專業的內容策略分析師。我正在針對關鍵字「{keywords}」進行 YouTube 市場調查。
-                以下是該關鍵字目前搜尋排名最前五名的影片標題：
+            # 我們直接把「搜尋」跟「分析」寫在同一個 Prompt 裡，讓 AI 一次做完
+            prompt_step1 = f"""
+            請利用你的 Google Search 搜尋能力，執行以下任務：
 
-                {search_data_str}
+            1. **搜尋動作**：請搜尋 YouTube 上關於「{keywords}」的熱門影片。
+            2. **列出清單**：請列出目前搜尋排名最前 5 名的影片標題，並盡可能附上連結（如果搜尋得到）。
+            3. **意圖分析**：根據你搜尋到的這些結果，分析搜尋這個關鍵字的人，背後真正的心理需求和動機是什麼？
+            4. **內容缺口**：推論有沒有什麼是搜尋者想看到，但目前的熱門內容似乎沒有直接回答到的面向？
 
-                請根據這些標題，幫我進行深入推論與分析：
-                1. **搜尋意圖分析**：搜尋這個字的人，背後真正的心理需求和動機是什麼？(是想解決問題？尋找娛樂？還是學習技能？)
-                2. **內容缺口 (Content Gap)**：根據現有前五名的標題，推論有沒有什麼是搜尋者可能想看到，但目前的熱門內容似乎沒有直接回答或涵蓋到的面向？
-                
-                請以條列式、專業且具體的語氣回答。
-                """
-                
-                analysis = analyze_with_gemini(prompt_intent, model_name)
-                st.session_state.analysis_step1 = analysis
-            else:
-                st.warning("未能找到相關影片，請稍後再試或更換關鍵字。")
+            請以 Markdown 格式清楚輸出。
+            """
             
-if st.session_state.analysis_step1:
-    st.markdown("### 🧠 Gemini 搜尋意圖與缺口分析")
-    st.info(st.session_state.analysis_step1)
+            response = ask_gemini(prompt_step1, model_name)
+            st.session_state.step1_result = response
+            
+if st.session_state.step1_result:
+    st.markdown("### 🧠 AI 搜尋與分析報告")
+    st.write(st.session_state.step1_result)
 
 st.markdown("---")
 
 # === 第二階段：競品深度解構 ===
 st.header("第二階段：競品內容深度解構")
-st.markdown("請輸入您想鎖定的影片網址 (一行一個)，系統將爬取字幕並進行結構拆解。")
+st.markdown("由於我們不使用程式爬取字幕，請貼上您想分析的影片網址，**AI 將透過網路搜尋該影片的摘要、介紹與評論來進行分析**。")
 
-video_urls_input = st.text_area("貼上影片網址", height=150, help="貼上剛剛搜尋到的，或是您想參考的特定影片網址")
+video_urls_input = st.text_area("貼上影片網址 (可多個)", height=100, help="AI 會嘗試去讀取這些連結的相關資訊")
 
-if st.button("🧬 進行 DNA 解構分析", key="analyze_btn"):
+if st.button("🧬 呼叫 AI 進行架構解構", key="analyze_btn"):
     if not api_key:
         st.error("請先輸入 API Key")
     elif not video_urls_input:
         st.warning("請貼上影片網址")
     else:
-        urls = video_urls_input.strip().split('\n')
-        transcripts_data = ""
-        
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        valid_videos = 0
-        
-        for i, url in enumerate(urls):
-            url = url.strip()
-            if not url: continue
+        with st.spinner("Gemini 正在網路上閱讀這些影片的相關資訊..."):
             
-            vid_id = get_video_id(url)
-            if vid_id:
-                status_text.text(f"正在讀取影片字幕 ({i+1}/{len(urls)}): {url} ...")
-                transcript = get_video_transcript(vid_id)
-                
-                if transcript.startswith("錯誤") or transcript.startswith("無法"):
-                    st.warning(f"影片 {vid_id} 略過: {transcript}")
-                else:
-                    # 限制長度
-                    transcripts_data += f"\n=== 影片 ID: {vid_id} 的字幕內容 ===\n{transcript[:20000]}...\n"
-                    valid_videos += 1
-            else:
-                st.warning(f"無效的 YouTube 網址格式: {url}")
-            
-            progress_bar.progress((i + 1) / len(urls))
-            
-        if valid_videos > 0:
-            status_text.text("正在呼叫 Gemini 進行深度分析...")
-            
-            prompt_structure = f"""
-            我收集了幾部關於該主題的熱門影片字幕內容。請閱讀以下內容並擔任內容架構師的角色：
+            prompt_step2 = f"""
+            我對以下這幾部 YouTube 影片感興趣，請利用 Google Search 搜尋這些影片的內容資訊（包含標題、說明欄、網路上的摘要或評論）：
 
-            {transcripts_data}
+            {video_urls_input}
 
             ---
             任務需求：
-            請綜合分析以上影片內容，並回答以下問題：
+            請根據你搜尋到的資訊，幫我進行「逆向工程」分析：
             
-            1. **主要切入點 (Angle)**：這些影片大多是從什麼角度切入這個主題的？(例如：恐懼行銷、手把手教學、趨勢分析、個人經驗談？)
-            2. **敘述架構 (Structure)**：歸納它們的腳本邏輯。它們是如何開場？中間如何鋪陳？最後如何結尾？
-            3. **手法分析 (Techniques)**：它們使用了哪些吸引觀眾的技巧？(例如：反直覺的觀點、大量數據佐證、情感共鳴？)
-            4. **延伸策略建議 (Strategy)**：如果我要以這些影片為競爭目標，製作一支「延伸」且「超越」它們內容的影片，我該準備哪些差異化的主題或內容？請給我 3 個具體的影片企劃方向。
+            1. **主要切入點 (Angle)**：分析這些影片是從什麼角度切入主題的？
+            2. **敘述架構 (Structure)**：推測它們的內容邏輯與鋪陳方式。
+            3. **手法分析 (Techniques)**：它們使用了哪些吸引觀眾的技巧？
+            4. **延伸策略建議 (Strategy)**：如果我要製作一支延伸且超越它們的影片，我該準備哪些差異化的主題？
 
-            輸出格式請使用 Markdown，保持專業、客觀。
+            請注意：你不需要觀看影片檔案，請根據網路上能搜尋到的文字資訊進行最優化的推論。
             """
             
-            final_analysis = analyze_with_gemini(prompt_structure, model_name)
+            final_analysis = ask_gemini(prompt_step2, model_name)
             
             st.success("分析完成！")
-            st.markdown("### 📝 影片切入點與架構解構報告")
+            st.markdown("### 📝 AI 影片架構解構報告")
             st.write(final_analysis)
-        else:
-            st.error("沒有任何影片成功提取到字幕，無法進行分析。")
