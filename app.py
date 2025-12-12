@@ -1,8 +1,8 @@
 import streamlit as st
 import google.generativeai as genai
-# 修改點：確認使用 youtube_search (對應 requirements.txt 中的 youtube-search)
 from youtube_search import YoutubeSearch
-from youtube_transcript_api import YouTubeTranscriptApi
+# 修改點：改為匯入整個模組，避免類別名稱衝突
+import youtube_transcript_api
 import urllib.parse
 import json
 
@@ -41,12 +41,10 @@ def get_video_id(url):
 def search_youtube_videos(keywords, max_results=5):
     """搜尋 YouTube 並返回前幾名結果 (使用 youtube-search)"""
     try:
-        # 使用 YoutubeSearch 套件進行搜尋
         results = YoutubeSearch(keywords, max_results=max_results).to_dict()
         
         processed_results = []
         for video in results:
-            # youtube-search 回傳的字典通常包含 id, title, views 等
             url = f"https://www.youtube.com/watch?v={video['id']}"
             processed_results.append({
                 "title": video['title'],
@@ -62,17 +60,21 @@ def search_youtube_videos(keywords, max_results=5):
 def get_video_transcript(video_id):
     """獲取影片字幕"""
     try:
-        # 嘗試獲取中文或英文字幕
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['zh-TW', 'zh-CN', 'en'])
+        # 修改點：使用完整模組路徑呼叫，解決 AttributeError
+        transcript_list = youtube_transcript_api.YouTubeTranscriptApi.get_transcript(
+            video_id, 
+            languages=['zh-TW', 'zh-CN', 'en']
+        )
         text = " ".join([t['text'] for t in transcript_list])
         return text
     except Exception as e:
-        # 常見錯誤處理
         error_msg = str(e)
         if "Subtitles are disabled" in error_msg:
             return "錯誤：該影片未提供字幕 (CC) 或字幕被停用。"
         elif "No transcripts were found" in error_msg:
             return "錯誤：找不到支援語言的字幕 (僅支援繁中/簡中/英文)。"
+        elif "Could not retrieve a transcript" in error_msg:
+             return "錯誤：無法檢索字幕，可能影片不允許或有地區限制。"
         return f"無法獲取字幕: {error_msg}"
 
 def analyze_with_gemini(prompt, model_ver):
@@ -172,10 +174,10 @@ if st.button("🧬 進行 DNA 解構分析", key="analyze_btn"):
                 status_text.text(f"正在讀取影片字幕 ({i+1}/{len(urls)}): {url} ...")
                 transcript = get_video_transcript(vid_id)
                 
-                # 簡單檢查回傳是否為錯誤訊息 (如果字串開頭包含"錯誤"或"無法")
                 if transcript.startswith("錯誤") or transcript.startswith("無法"):
                     st.warning(f"影片 {vid_id} 略過: {transcript}")
                 else:
+                    # 限制長度
                     transcripts_data += f"\n=== 影片 ID: {vid_id} 的字幕內容 ===\n{transcript[:20000]}...\n"
                     valid_videos += 1
             else:
