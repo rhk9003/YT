@@ -7,7 +7,13 @@ st.set_page_config(page_title="YouTube 內容策略分析 (AI 全託管版)", pa
 # --- 側邊欄：設定 ---
 st.sidebar.title("🔧 系統設定")
 api_key = st.sidebar.text_input("輸入 Google Gemini API Key", type="password")
-model_name = st.sidebar.text_input("模型名稱", value="gemini-1.5-pro", help="建議使用 gemini-1.5-pro 或更強的模型，以獲得較好的聯網搜尋能力")
+
+# 根據您的清單，預設使用 gemini-2.0-flash，這通常支援搜尋且速度快
+model_name = st.sidebar.text_input(
+    "模型名稱", 
+    value="gemini-2.0-flash", 
+    help="可用模型範例: gemini-2.0-flash, gemini-2.5-pro, gemini-3-pro"
+)
 
 # 初始化 Gemini
 if api_key:
@@ -16,7 +22,8 @@ if api_key:
 def ask_gemini(prompt, model_ver):
     """將任務完全交給 Gemini 處理"""
     try:
-        # 設定工具：嘗試啟用 Google Search (如果模型支援)
+        # 設定工具：啟用 Google Search
+        # 注意：這需要 google-generativeai>=0.8.3
         tools = [
             {"google_search": {}}
         ]
@@ -28,11 +35,14 @@ def ask_gemini(prompt, model_ver):
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return f"AI 思考時發生錯誤 (可能是 API Key 問題或模型不支援搜尋): {str(e)}"
+        error_msg = str(e)
+        if "Unknown field for FunctionDeclaration" in error_msg:
+            return "系統錯誤：套件版本過舊。請點選右下角 'Manage app' -> 'Reboot app' 來更新環境。"
+        return f"AI 思考時發生錯誤 (可能是 API Key 問題或模型不支援搜尋): {error_msg}"
 
 # --- 主介面 ---
 st.title("🤖 YouTube 內容策略分析 (AI 全託管版)")
-st.caption("本版本捨棄傳統爬蟲程式，改由 Gemini 直接聯網搜尋與分析，穩定性更高。")
+st.caption("本版本捨棄傳統爬蟲程式，改由 Gemini 直接聯網搜尋與分析。")
 st.markdown("---")
 
 # 狀態管理
@@ -50,9 +60,8 @@ if st.button("🚀 呼叫 AI 進行搜尋與分析", key="search_btn"):
     elif not keywords:
         st.warning("請輸入關鍵字")
     else:
-        with st.spinner(f"Gemini 正在網路上搜尋 '{keywords}' 的相關影片並進行分析..."):
+        with st.spinner(f"Gemini ({model_name}) 正在網路上搜尋 '{keywords}' 的相關影片並進行分析..."):
             
-            # 我們直接把「搜尋」跟「分析」寫在同一個 Prompt 裡，讓 AI 一次做完
             prompt_step1 = f"""
             請利用你的 Google Search 搜尋能力，執行以下任務：
 
@@ -85,7 +94,7 @@ if st.button("🧬 呼叫 AI 進行架構解構", key="analyze_btn"):
     elif not video_urls_input:
         st.warning("請貼上影片網址")
     else:
-        with st.spinner("Gemini 正在網路上閱讀這些影片的相關資訊..."):
+        with st.spinner(f"Gemini ({model_name}) 正在網路上閱讀這些影片的相關資訊..."):
             
             prompt_step2 = f"""
             我對以下這幾部 YouTube 影片感興趣，請利用 Google Search 搜尋這些影片的內容資訊（包含標題、說明欄、網路上的摘要或評論）：
