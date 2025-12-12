@@ -2,6 +2,7 @@ import streamlit as st
 import google.generativeai as genai
 import requests
 import json
+import re  # 新增 regex 用於提取網址
 
 # 設定頁面配置
 st.set_page_config(page_title="YouTube 內容策略分析 (AI 全託管版)", page_icon="🤖", layout="wide")
@@ -17,11 +18,21 @@ except:
     sdk_version = "未知"
 st.sidebar.caption(f"目前 SDK 版本: {sdk_version}")
 
-# 預設使用支援搜尋的模型
-model_name = st.sidebar.text_input(
-    "模型名稱", 
-    value="gemini-2.0-flash", 
-    help="請確保使用支援 Google Search 的模型，例如 gemini-2.0-flash 或 gemini-1.5-pro"
+# 修改點 1: 改為下拉選單，依據 Google AI 定價頁面的常見模型
+# 參考網址: https://ai.google.dev/gemini-api/docs/pricing?hl=zh-tw
+model_options = [
+    "gemini-2.0-flash-exp",
+    "gemini-1.5-pro",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-8b",
+    "gemini-1.0-pro"
+]
+
+model_name = st.sidebar.selectbox(
+    "選擇模型", 
+    options=model_options,
+    index=0,
+    help="請選擇要使用的 Gemini 模型版本"
 )
 
 # 初始化 Gemini
@@ -94,6 +105,8 @@ st.markdown("---")
 # 狀態管理
 if 'step1_result' not in st.session_state:
     st.session_state.step1_result = ""
+if 'auto_filled_urls' not in st.session_state:
+    st.session_state.auto_filled_urls = ""
 
 # === 第一階段：關鍵字搜索與市場意圖分析 ===
 st.header("第一階段：關鍵字搜尋與意圖偵察")
@@ -112,7 +125,7 @@ if st.button("🚀 呼叫 AI 進行搜尋與分析", key="search_btn"):
             請利用你的 Google Search 搜尋能力，執行以下任務：
 
             1. **搜尋動作**：請搜尋 YouTube 上關於「{keywords}」的熱門影片。
-            2. **列出清單**：請列出目前搜尋排名最前 5 名的影片標題，並盡可能附上連結（如果搜尋得到）。
+            2. **列出清單**：請列出目前搜尋排名最前 5 名的影片標題，並**務必附上 YouTube 影片網址連結**。
             3. **意圖分析**：根據你搜尋到的這些結果，分析搜尋這個關鍵字的人，背後真正的心理需求和動機是什麼？
             4. **內容缺口**：推論有沒有什麼是搜尋者想看到，但目前的熱門內容似乎沒有直接回答到的面向？
 
@@ -121,6 +134,15 @@ if st.button("🚀 呼叫 AI 進行搜尋與分析", key="search_btn"):
             
             response = ask_gemini(prompt_step1, model_name)
             st.session_state.step1_result = response
+
+            # 修改點 2: 自動提取網址邏輯
+            # 使用 Regex 尋找回應中的 YouTube 連結
+            found_urls = re.findall(r'(https?://(?:www\.)?(?:youtube\.com|youtu\.be)/[^\s\)\>\"\]]+)', response)
+            # 去除重複並轉為字串
+            unique_urls = list(set(found_urls))
+            if unique_urls:
+                st.session_state.auto_filled_urls = "\n".join(unique_urls)
+                st.toast(f"已自動擷取 {len(unique_urls)} 個影片網址到第二階段！", icon="✅")
             
 if st.session_state.step1_result:
     st.markdown("### 🧠 AI 搜尋與分析報告")
@@ -132,7 +154,13 @@ st.markdown("---")
 st.header("第二階段：競品內容深度解構")
 st.markdown("請貼上您想分析的影片網址，AI 將透過網路搜尋該影片的摘要、介紹與評論來進行分析。")
 
-video_urls_input = st.text_area("貼上影片網址 (可多個)", height=100, help="AI 會嘗試去讀取這些連結的相關資訊")
+# 修改點 2 (續): 將 value 綁定到自動擷取的 session_state
+video_urls_input = st.text_area(
+    "貼上影片網址 (可多個)", 
+    value=st.session_state.auto_filled_urls,
+    height=100, 
+    help="AI 會嘗試去讀取這些連結的相關資訊"
+)
 
 if st.button("🧬 呼叫 AI 進行架構解構", key="analyze_btn"):
     if not api_key:
