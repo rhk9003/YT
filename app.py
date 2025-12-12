@@ -8,11 +8,11 @@ st.set_page_config(page_title="YouTube 內容策略分析 (AI 全託管版)", pa
 st.sidebar.title("🔧 系統設定")
 api_key = st.sidebar.text_input("輸入 Google Gemini API Key", type="password")
 
-# 根據您的清單，預設使用 gemini-2.0-flash，這通常支援搜尋且速度快
+# 預設使用支援搜尋的模型
 model_name = st.sidebar.text_input(
     "模型名稱", 
     value="gemini-2.0-flash", 
-    help="可用模型範例: gemini-2.0-flash, gemini-2.5-pro, gemini-3-pro"
+    help="請確保使用支援 Google Search 的模型，例如 gemini-2.0-flash 或 gemini-1.5-pro"
 )
 
 # 初始化 Gemini
@@ -20,10 +20,9 @@ if api_key:
     genai.configure(api_key=api_key)
 
 def ask_gemini(prompt, model_ver):
-    """將任務完全交給 Gemini 處理"""
+    """將任務完全交給 Gemini 處理 (啟用 Google Search)"""
     try:
         # 設定工具：啟用 Google Search
-        # 注意：這需要 google-generativeai>=0.8.3
         tools = [
             {"google_search": {}}
         ]
@@ -36,13 +35,11 @@ def ask_gemini(prompt, model_ver):
         return response.text
     except Exception as e:
         error_msg = str(e)
-        if "Unknown field for FunctionDeclaration" in error_msg:
-            return "系統錯誤：套件版本過舊。請點選右下角 'Manage app' -> 'Reboot app' 來更新環境。"
-        return f"AI 思考時發生錯誤 (可能是 API Key 問題或模型不支援搜尋): {error_msg}"
+        return f"AI 發生錯誤: {error_msg}"
 
 # --- 主介面 ---
 st.title("🤖 YouTube 內容策略分析 (AI 全託管版)")
-st.caption("本版本捨棄傳統爬蟲程式，改由 Gemini 直接聯網搜尋與分析。")
+st.caption("目前模式：AI 聯網搜尋 (無須安裝爬蟲套件)")
 st.markdown("---")
 
 # 狀態管理
@@ -84,7 +81,7 @@ st.markdown("---")
 
 # === 第二階段：競品深度解構 ===
 st.header("第二階段：競品內容深度解構")
-st.markdown("由於我們不使用程式爬取字幕，請貼上您想分析的影片網址，**AI 將透過網路搜尋該影片的摘要、介紹與評論來進行分析**。")
+st.markdown("請貼上您想分析的影片網址，AI 將透過網路搜尋該影片的摘要、介紹與評論來進行分析。")
 
 video_urls_input = st.text_area("貼上影片網址 (可多個)", height=100, help="AI 會嘗試去讀取這些連結的相關資訊")
 
