@@ -1,7 +1,7 @@
 import streamlit as st
 import google.generativeai as genai
-# 修改點：改用 youtubesearchpython (對應 requirements.txt)
-from youtubesearchpython import VideosSearch
+# 修改點：改回使用 youtube-search，解決 proxies 錯誤
+from youtube_search import YoutubeSearch
 from youtube_transcript_api import YouTubeTranscriptApi
 import urllib.parse
 import json
@@ -39,26 +39,20 @@ def get_video_id(url):
     return None
 
 def search_youtube_videos(keywords, max_results=5):
-    """搜尋 YouTube 並返回前幾名結果 (使用 youtube-search-python)"""
+    """搜尋 YouTube 並返回前幾名結果 (使用 youtube-search)"""
     try:
-        videosSearch = VideosSearch(keywords, limit=max_results)
-        results = videosSearch.result()['result']
+        # 使用 YoutubeSearch 套件進行搜尋
+        results = YoutubeSearch(keywords, max_results=max_results).to_dict()
         
         processed_results = []
         for video in results:
-            # 處理觀看次數格式 (API 返回結構可能不同，做安全存取)
-            views = "N/A"
-            if 'viewCount' in video:
-                if isinstance(video['viewCount'], dict):
-                    views = video['viewCount'].get('short', 'N/A')
-                else:
-                    views = str(video['viewCount'])
-
+            # youtube-search 回傳的字典通常包含 id, title, views 等
+            url = f"https://www.youtube.com/watch?v={video['id']}"
             processed_results.append({
                 "title": video['title'],
-                "link": video['link'],
+                "link": url,
                 "id": video['id'],
-                "views": views
+                "views": video.get('views', 'N/A')
             })
         return processed_results
     except Exception as e:
