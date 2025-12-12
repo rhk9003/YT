@@ -1,6 +1,6 @@
 import streamlit as st
 import google.generativeai as genai
-# 修改點：換回輕量級的 youtube_search，解決 proxies 報錯問題
+# 使用穩定性較高的 youtube-search，並修正網址格式問題
 from youtube_search import YoutubeSearch
 import time
 
@@ -37,7 +37,7 @@ if api_key:
 def get_real_youtube_ranking(keyword, limit=5):
     """
     使用 youtube-search 獲取真實的 YouTube 站內搜尋排名。
-    這比 Google Search site:youtube.com 更準確反映 YouTube 演算法偏好。
+    並進行網址淨化，移除 &pp=... 等追蹤參數。
     """
     try:
         # 使用 YoutubeSearch 輕量套件
@@ -45,13 +45,21 @@ def get_real_youtube_ranking(keyword, limit=5):
         
         parsed_results = []
         for v in results:
-            # 組合完整網址 (套件回傳的是 url_suffix)
-            link = f"https://www.youtube.com{v['url_suffix']}"
+            # 修改重點：直接提取 ID 組成乾淨網址，不使用 url_suffix
+            video_id = v.get('id')
+            if video_id:
+                clean_link = f"https://www.youtube.com/watch?v={video_id}"
+            else:
+                # 備用方案：如果沒有 ID，嘗試清理 url_suffix
+                suffix = v.get('url_suffix', '')
+                if '&' in suffix:
+                    suffix = suffix.split('&')[0]
+                clean_link = f"https://www.youtube.com{suffix}"
             
             parsed_results.append({
                 "title": v['title'],
-                "link": link,
-                "id": v['id'],
+                "link": clean_link,
+                "id": video_id,
                 "duration": v.get('duration', 'N/A'),
                 "views": v.get('views', 'N/A'),
                 "channel": v.get('channel', 'Unknown')
@@ -104,8 +112,11 @@ if st.button("🚀 搜尋並分析", key="search_btn"):
                 st.subheader("📊 真實搜尋排名 TOP 5")
                 result_text_block = ""
                 for idx, item in enumerate(raw_results):
-                    display_text = f"{idx+1}. [{item['title']}]({item['link']}) - {item['channel']} ({item['views']})"
-                    st.markdown(display_text)
+                    # 顯示可點擊的連結與詳細資訊
+                    st.markdown(f"**{idx+1}. {item['title']}**")
+                    st.markdown(f"- 頻道: {item['channel']} | 觀看: {item['views']}")
+                    st.markdown(f"- 網址: {item['link']}") # 明確顯示網址
+                    
                     result_text_block += f"{idx+1}. 標題：{item['title']}\n   頻道：{item['channel']}\n   觀看數：{item['views']}\n   網址：{item['link']}\n\n"
                 
                 # 2. 將真實數據餵給 Gemini 進行分析
@@ -138,12 +149,12 @@ st.markdown("---")
 # === 第二階段：競品深度解構 ===
 st.header("第二階段：競品內容深度解構")
 
-# 自動填入第一階段抓到的網址
+# 自動填入第一階段抓到的網址 (這裡的 link 已經是經過淨化的乾淨版本)
 default_urls = ""
 if st.session_state.search_data:
     default_urls = "\n".join([item['link'] for item in st.session_state.search_data])
 
-st.markdown("系統已自動帶入第一階段的熱門影片網址，您也可以手動修改或加入其他影片。")
+st.markdown("系統已自動帶入第一階段的熱門影片網址 (已自動淨化格式)，您也可以手動修改或加入其他影片。")
 video_urls_input = st.text_area(
     "目標影片網址", 
     value=default_urls,
