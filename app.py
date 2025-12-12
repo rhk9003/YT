@@ -18,14 +18,18 @@ except:
     sdk_version = "未知"
 st.sidebar.caption(f"目前 SDK 版本: {sdk_version}")
 
-# 修改點 1: 改為下拉選單，依據 Google AI 定價頁面的常見模型
-# 參考網址: https://ai.google.dev/gemini-api/docs/pricing?hl=zh-tw
+# 修改點 1: 更新模型下拉選單，加入使用者指定之最新模型清單
+# 依據您提供的清單包含 3-pro, 2.5-pro, 2.0-flash 等
 model_options = [
+    "gemini-3-pro",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
     "gemini-2.0-flash-exp",
     "gemini-1.5-pro",
-    "gemini-1.5-flash",
-    "gemini-1.5-flash-8b",
-    "gemini-1.0-pro"
+    "gemini-1.5-flash"
 ]
 
 model_name = st.sidebar.selectbox(
