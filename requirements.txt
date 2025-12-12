@@ -1,5 +1,2 @@
 streamlit
 google-generativeai
-youtube-search
-youtube-transcript-api>=0.6.1
-requests>=2.31.0
