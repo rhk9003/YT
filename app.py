@@ -1,6 +1,6 @@
 import streamlit as st
 import google.generativeai as genai
-# 修改點：改回使用 youtube-search，解決 proxies 錯誤
+# 修改點：確認使用 youtube_search (對應 requirements.txt 中的 youtube-search)
 from youtube_search import YoutubeSearch
 from youtube_transcript_api import YouTubeTranscriptApi
 import urllib.parse
