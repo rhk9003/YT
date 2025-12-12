@@ -1,8 +1,8 @@
 import streamlit as st
 import google.generativeai as genai
 from youtube_search import YoutubeSearch
-# 修改點：改為匯入整個模組，避免類別名稱衝突
-import youtube_transcript_api
+# 修改點：改用標準的從模組匯入類別的方式，解決 Attribute Error
+from youtube_transcript_api import YouTubeTranscriptApi
 import urllib.parse
 import json
 
@@ -60,8 +60,8 @@ def search_youtube_videos(keywords, max_results=5):
 def get_video_transcript(video_id):
     """獲取影片字幕"""
     try:
-        # 修改點：使用完整模組路徑呼叫，解決 AttributeError
-        transcript_list = youtube_transcript_api.YouTubeTranscriptApi.get_transcript(
+        # 修改點：直接調用導入的類別方法
+        transcript_list = YouTubeTranscriptApi.get_transcript(
             video_id, 
             languages=['zh-TW', 'zh-CN', 'en']
         )
