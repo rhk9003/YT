@@ -1,6 +1,7 @@
 import streamlit as st
 import google.generativeai as genai
-from youtube_search import YoutubeSearch
+# 修改點：改用 youtubesearchpython (對應 requirements.txt)
+from youtubesearchpython import VideosSearch
 from youtube_transcript_api import YouTubeTranscriptApi
 import urllib.parse
 import json
@@ -21,41 +22,64 @@ if api_key:
 
 def get_video_id(url):
     """從 YouTube 網址提取 Video ID"""
-    query = urllib.parse.urlparse(url)
-    if query.hostname == 'youtu.be':
-        return query.path[1:]
-    if query.hostname in ('www.youtube.com', 'youtube.com'):
-        if query.path == '/watch':
-            p = urllib.parse.parse_qs(query.query)
-            return p['v'][0]
-        if query.path[:7] == '/embed/':
-            return query.path.split('/')[2]
-        if query.path[:3] == '/v/':
-            return query.path.split('/')[2]
+    try:
+        query = urllib.parse.urlparse(url)
+        if query.hostname == 'youtu.be':
+            return query.path[1:]
+        if query.hostname in ('www.youtube.com', 'youtube.com'):
+            if query.path == '/watch':
+                p = urllib.parse.parse_qs(query.query)
+                return p['v'][0]
+            if query.path[:7] == '/embed/':
+                return query.path.split('/')[2]
+            if query.path[:3] == '/v/':
+                return query.path.split('/')[2]
+    except:
+        return None
     return None
 
 def search_youtube_videos(keywords, max_results=5):
-    """搜尋 YouTube 並返回前幾名結果"""
-    results = YoutubeSearch(keywords, max_results=max_results).to_dict()
-    processed_results = []
-    for video in results:
-        url = f"https://www.youtube.com/watch?v={video['id']}"
-        processed_results.append({
-            "title": video['title'],
-            "link": url,
-            "id": video['id'],
-            "views": video.get('views', 'N/A')
-        })
-    return processed_results
+    """搜尋 YouTube 並返回前幾名結果 (使用 youtube-search-python)"""
+    try:
+        videosSearch = VideosSearch(keywords, limit=max_results)
+        results = videosSearch.result()['result']
+        
+        processed_results = []
+        for video in results:
+            # 處理觀看次數格式 (API 返回結構可能不同，做安全存取)
+            views = "N/A"
+            if 'viewCount' in video:
+                if isinstance(video['viewCount'], dict):
+                    views = video['viewCount'].get('short', 'N/A')
+                else:
+                    views = str(video['viewCount'])
+
+            processed_results.append({
+                "title": video['title'],
+                "link": video['link'],
+                "id": video['id'],
+                "views": views
+            })
+        return processed_results
+    except Exception as e:
+        st.error(f"搜尋發生錯誤: {e}")
+        return []
 
 def get_video_transcript(video_id):
     """獲取影片字幕"""
     try:
+        # 嘗試獲取中文或英文字幕
         transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['zh-TW', 'zh-CN', 'en'])
         text = " ".join([t['text'] for t in transcript_list])
         return text
     except Exception as e:
-        return f"無法獲取字幕 (可能未提供 CC 或被停用): {str(e)}"
+        # 常見錯誤處理
+        error_msg = str(e)
+        if "Subtitles are disabled" in error_msg:
+            return "錯誤：該影片未提供字幕 (CC) 或字幕被停用。"
+        elif "No transcripts were found" in error_msg:
+            return "錯誤：找不到支援語言的字幕 (僅支援繁中/簡中/英文)。"
+        return f"無法獲取字幕: {error_msg}"
 
 def analyze_with_gemini(prompt, model_ver):
     """呼叫 Gemini API 進行分析"""
@@ -92,29 +116,32 @@ if st.button("🚀 啟動偵察", key="search_btn"):
             # 1. 爬取 YouTube 搜尋結果
             st.session_state.search_results = search_youtube_videos(keywords)
             
-            # 顯示結果
-            st.subheader(f"🔍 '{keywords}' 搜尋排名 Top 5")
-            for idx, vid in enumerate(st.session_state.search_results):
-                st.markdown(f"**{idx+1}. [{vid['title']}]({vid['link']})** (觀看數: {vid['views']})")
-            
-            # 2. Gemini 意圖分析
-            search_data_str = "\n".join([f"{i+1}. {v['title']}" for i, v in enumerate(st.session_state.search_results)])
-            
-            prompt_intent = f"""
-            你是一位專業的內容策略分析師。我正在針對關鍵字「{keywords}」進行 YouTube 市場調查。
-            以下是該關鍵字目前搜尋排名最前五名的影片標題：
+            if st.session_state.search_results:
+                # 顯示結果
+                st.subheader(f"🔍 '{keywords}' 搜尋排名 Top 5")
+                for idx, vid in enumerate(st.session_state.search_results):
+                    st.markdown(f"**{idx+1}. [{vid['title']}]({vid['link']})** (觀看數: {vid['views']})")
+                
+                # 2. Gemini 意圖分析
+                search_data_str = "\n".join([f"{i+1}. {v['title']}" for i, v in enumerate(st.session_state.search_results)])
+                
+                prompt_intent = f"""
+                你是一位專業的內容策略分析師。我正在針對關鍵字「{keywords}」進行 YouTube 市場調查。
+                以下是該關鍵字目前搜尋排名最前五名的影片標題：
 
-            {search_data_str}
+                {search_data_str}
 
-            請根據這些標題，幫我進行深入推論與分析：
-            1. **搜尋意圖分析**：搜尋這個字的人，背後真正的心理需求和動機是什麼？(是想解決問題？尋找娛樂？還是學習技能？)
-            2. **內容缺口 (Content Gap)**：根據現有前五名的標題，推論有沒有什麼是搜尋者可能想看到，但目前的熱門內容似乎沒有直接回答或涵蓋到的面向？
-            
-            請以條列式、專業且具體的語氣回答。
-            """
-            
-            analysis = analyze_with_gemini(prompt_intent, model_name)
-            st.session_state.analysis_step1 = analysis
+                請根據這些標題，幫我進行深入推論與分析：
+                1. **搜尋意圖分析**：搜尋這個字的人，背後真正的心理需求和動機是什麼？(是想解決問題？尋找娛樂？還是學習技能？)
+                2. **內容缺口 (Content Gap)**：根據現有前五名的標題，推論有沒有什麼是搜尋者可能想看到，但目前的熱門內容似乎沒有直接回答或涵蓋到的面向？
+                
+                請以條列式、專業且具體的語氣回答。
+                """
+                
+                analysis = analyze_with_gemini(prompt_intent, model_name)
+                st.session_state.analysis_step1 = analysis
+            else:
+                st.warning("未能找到相關影片，請稍後再試或更換關鍵字。")
             
 if st.session_state.analysis_step1:
     st.markdown("### 🧠 Gemini 搜尋意圖與缺口分析")
@@ -148,11 +175,17 @@ if st.button("🧬 進行 DNA 解構分析", key="analyze_btn"):
             
             vid_id = get_video_id(url)
             if vid_id:
-                status_text.text(f"正在讀取影片字幕: {url} ...")
+                status_text.text(f"正在讀取影片字幕 ({i+1}/{len(urls)}): {url} ...")
                 transcript = get_video_transcript(vid_id)
-                # 限制每個字幕長度以免爆 token (視情況調整，Gemini Pro 視窗很大通常沒問題)
-                transcripts_data += f"\n=== 影片 ID: {vid_id} 的字幕內容 ===\n{transcript[:20000]}...\n"
-                valid_videos += 1
+                
+                # 簡單檢查回傳是否為錯誤訊息 (如果字串開頭包含"錯誤"或"無法")
+                if transcript.startswith("錯誤") or transcript.startswith("無法"):
+                    st.warning(f"影片 {vid_id} 略過: {transcript}")
+                else:
+                    transcripts_data += f"\n=== 影片 ID: {vid_id} 的字幕內容 ===\n{transcript[:20000]}...\n"
+                    valid_videos += 1
+            else:
+                st.warning(f"無效的 YouTube 網址格式: {url}")
             
             progress_bar.progress((i + 1) / len(urls))
             
@@ -182,4 +215,4 @@ if st.button("🧬 進行 DNA 解構分析", key="analyze_btn"):
             st.markdown("### 📝 影片切入點與架構解構報告")
             st.write(final_analysis)
         else:
-            st.error("無法從提供的網址中獲取有效字幕，請確認影片連結是否正確且具有公開字幕。")
+            st.error("沒有任何影片成功提取到字幕，無法進行分析。")
