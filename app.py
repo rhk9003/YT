@@ -1,8 +1,9 @@
 import streamlit as st
 import google.generativeai as genai
+import requests
+import json
 # 使用穩定性較高的 youtube-search
 from youtube_search import YoutubeSearch
-import time
 
 # 設定頁面配置
 st.set_page_config(page_title="YouTube 內容策略分析 (精準排名版)", page_icon="▶️", layout="wide")
@@ -28,7 +29,7 @@ model_name = st.sidebar.selectbox(
     index=0
 )
 
-# 初始化 Gemini
+# 初始化 Gemini SDK (僅作備用)
 if api_key:
     genai.configure(api_key=api_key)
 
@@ -40,31 +41,26 @@ def get_real_youtube_ranking(keyword, limit=5):
     並進行嚴格的網址淨化，確保不包含無效參數或錯誤 ID。
     """
     try:
-        # 使用 YoutubeSearch 輕量套件
         results = YoutubeSearch(keyword, max_results=limit).to_dict()
         
         parsed_results = []
         for v in results:
-            # 策略：優先信任 url_suffix
             suffix = v.get('url_suffix', '')
             
-            # 防呆
             if not suffix and v.get('id'):
                 suffix = f"/watch?v={v['id']}"
             
             if not suffix:
                 continue 
 
-            # 關鍵修正：強制移除所有 URL 參數
+            # 強制移除所有 URL 參數
             if '&' in suffix:
                 clean_suffix = suffix.split('&')[0]
             else:
                 clean_suffix = suffix
             
-            # 組合成乾淨的網址
             clean_link = f"https://www.youtube.com{clean_suffix}"
             
-            # 重新提取 ID
             if 'v=' in clean_suffix:
                 video_id = clean_suffix.split('v=')[-1]
             else:
@@ -83,19 +79,68 @@ def get_real_youtube_ranking(keyword, limit=5):
         st.error(f"YouTube 搜尋連線失敗: {str(e)}")
         return []
 
+def ask_gemini_rest_api(prompt, model_ver, api_key):
+    """
+    【救援機制】直接使用 REST API 呼叫 Gemini。
+    當 SDK 版本過舊報錯時，這個函式可以繞過 SDK 直接與 Google 伺服器溝通。
+    """
+    try:
+        # 建構 API URL
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_ver}:generateContent?key={api_key}"
+        headers = {'Content-Type': 'application/json'}
+        
+        # 設定 Payload，啟用 Google Search 工具
+        data = {
+            "contents": [{
+                "parts": [{"text": prompt}]
+            }],
+            "tools": [{
+                "google_search": {}
+            }]
+        }
+        
+        # 發送 POST 請求
+        response = requests.post(url, headers=headers, json=data)
+        
+        if response.status_code == 200:
+            result = response.json()
+            try:
+                # 嘗試解析回應文字
+                return result['candidates'][0]['content']['parts'][0]['text']
+            except (KeyError, IndexError):
+                return f"API 回傳格式異常: {json.dumps(result)}"
+        else:
+            return f"REST API 錯誤 (Status {response.status_code}): {response.text}"
+            
+    except Exception as e:
+        return f"REST API 連線失敗: {str(e)}"
+
 def ask_gemini(prompt, model_ver):
-    """呼叫 Gemini 進行分析 (啟用 Google Search 以備不時之需)"""
+    """
+    主呼叫函式：優先嘗試 SDK，若失敗自動切換到 REST API。
+    """
+    # 1. 嘗試使用 SDK
     try:
         tools = [{"google_search": {}}]
         model = genai.GenerativeModel(model_ver, tools=tools)
         response = model.generate_content(prompt)
         return response.text
+        
     except Exception as e:
-        return f"AI 分析發生錯誤: {str(e)}"
+        error_msg = str(e)
+        # 2. 捕捉特定錯誤，切換到 REST API
+        if "Unknown field" in error_msg or "google_search" in error_msg:
+            if api_key:
+                # 靜默切換，直接回傳 REST API 的結果
+                return ask_gemini_rest_api(prompt, model_ver, api_key)
+            else:
+                return "錯誤：SDK 版本過舊且未設定 API Key，無法切換至備援模式。"
+        
+        return f"AI 分析發生錯誤: {error_msg}"
 
 # --- 主介面 ---
 st.title("▶️ YouTube 內容策略分析 (精準排名版)")
-st.caption("目前模式：Python 原生搜尋 (確保 YouTube 真實排名) + AI 深度分析")
+st.caption("目前模式：Python 原生搜尋 + AI 雙軌分析 (SDK/REST)")
 st.markdown("---")
 
 # 狀態管理
@@ -103,7 +148,7 @@ if 'search_data' not in st.session_state:
     st.session_state.search_data = []
 if 'analysis_step1' not in st.session_state:
     st.session_state.analysis_step1 = ""
-if 'analysis_step2' not in st.session_state: # 新增：存儲第二階段分析結果
+if 'analysis_step2' not in st.session_state:
     st.session_state.analysis_step2 = ""
 
 # === 第一階段：精準搜尋與意圖分析 ===
@@ -204,13 +249,13 @@ if st.button("🧬 進行 DNA 解構分析", key="analyze_btn"):
             """
             
             final_analysis = ask_gemini(prompt_step2, model_name)
-            st.session_state.analysis_step2 = final_analysis # 儲存結果供第三階段使用
+            st.session_state.analysis_step2 = final_analysis 
             
             st.success("分析完成！")
             st.markdown("### 📝 AI 影片架構解構報告")
             st.write(final_analysis)
 
-# === 第三階段：致勝主題企劃 (New) ===
+# === 第三階段：致勝主題企劃 ===
 if st.session_state.analysis_step2:
     st.markdown("---")
     st.header("第三階段：超越與延伸主題企劃")
