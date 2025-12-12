@@ -2,3 +2,4 @@ streamlit
 google-generativeai
 requests
 pytz
+youtube-search-python
