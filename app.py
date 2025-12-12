@@ -1,5 +1,7 @@
 import streamlit as st
 import google.generativeai as genai
+import requests
+import json
 
 # 設定頁面配置
 st.set_page_config(page_title="YouTube 內容策略分析 (AI 全託管版)", page_icon="🤖", layout="wide")
@@ -7,6 +9,13 @@ st.set_page_config(page_title="YouTube 內容策略分析 (AI 全託管版)", pa
 # --- 側邊欄：設定 ---
 st.sidebar.title("🔧 系統設定")
 api_key = st.sidebar.text_input("輸入 Google Gemini API Key", type="password")
+
+# 顯示 SDK 版本以供除錯
+try:
+    sdk_version = genai.__version__
+except:
+    sdk_version = "未知"
+st.sidebar.caption(f"目前 SDK 版本: {sdk_version}")
 
 # 預設使用支援搜尋的模型
 model_name = st.sidebar.text_input(
@@ -19,8 +28,39 @@ model_name = st.sidebar.text_input(
 if api_key:
     genai.configure(api_key=api_key)
 
+def ask_gemini_rest_api(prompt, model_ver, api_key):
+    """備用方案：直接使用 REST API 呼叫，繞過 SDK 版本問題"""
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_ver}:generateContent?key={api_key}"
+        headers = {'Content-Type': 'application/json'}
+        data = {
+            "contents": [{
+                "parts": [{"text": prompt}]
+            }],
+            "tools": [{
+                "google_search": {}
+            }]
+        }
+        
+        response = requests.post(url, headers=headers, json=data)
+        
+        if response.status_code == 200:
+            result = response.json()
+            # 解析回應文字
+            try:
+                return result['candidates'][0]['content']['parts'][0]['text']
+            except (KeyError, IndexError):
+                return "API 回傳了意料之外的格式，請檢查 Logs。"
+        else:
+            return f"REST API 錯誤 (Status {response.status_code}): {response.text}"
+            
+    except Exception as e:
+        return f"REST API 連線失敗: {str(e)}"
+
 def ask_gemini(prompt, model_ver):
     """將任務完全交給 Gemini 處理 (啟用 Google Search)"""
+    
+    # 優先嘗試 SDK 方法
     try:
         # 設定工具：啟用 Google Search
         tools = [
@@ -33,13 +73,22 @@ def ask_gemini(prompt, model_ver):
         # 生成內容
         response = model.generate_content(prompt)
         return response.text
+        
     except Exception as e:
         error_msg = str(e)
+        # 如果是特定的 SDK 版本錯誤，自動切換到 REST API
+        if "Unknown field for FunctionDeclaration" in error_msg or "google_search" in error_msg:
+            # st.warning("檢測到 SDK 版本舊問題，正在切換至 REST API 模式...") # 可選：顯示切換訊息
+            if api_key:
+                return ask_gemini_rest_api(prompt, model_ver, api_key)
+            else:
+                return "API Key 未設定，無法使用備用方案。"
+        
         return f"AI 發生錯誤: {error_msg}"
 
 # --- 主介面 ---
 st.title("🤖 YouTube 內容策略分析 (AI 全託管版)")
-st.caption("目前模式：AI 聯網搜尋 (無須安裝爬蟲套件)")
+st.caption("目前模式：AI 聯網搜尋 (SDK/REST 混合雙引擎)")
 st.markdown("---")
 
 # 狀態管理
