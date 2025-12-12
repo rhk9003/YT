@@ -1,7 +1,7 @@
 import streamlit as st
 import google.generativeai as genai
-# 使用穩定性較高的 youtube-search-python
-from youtubesearchpython import VideosSearch
+# 修改點：換回輕量級的 youtube_search，解決 proxies 報錯問題
+from youtube_search import YoutubeSearch
 import time
 
 # 設定頁面配置
@@ -36,26 +36,29 @@ if api_key:
 
 def get_real_youtube_ranking(keyword, limit=5):
     """
-    使用 youtube-search-python 獲取真實的 YouTube 站內搜尋排名。
+    使用 youtube-search 獲取真實的 YouTube 站內搜尋排名。
     這比 Google Search site:youtube.com 更準確反映 YouTube 演算法偏好。
     """
     try:
-        search = VideosSearch(keyword, limit=limit)
-        results = search.result()['result']
+        # 使用 YoutubeSearch 輕量套件
+        results = YoutubeSearch(keyword, max_results=limit).to_dict()
         
         parsed_results = []
         for v in results:
+            # 組合完整網址 (套件回傳的是 url_suffix)
+            link = f"https://www.youtube.com{v['url_suffix']}"
+            
             parsed_results.append({
                 "title": v['title'],
-                "link": v['link'],
+                "link": link,
                 "id": v['id'],
                 "duration": v.get('duration', 'N/A'),
-                "views": v.get('viewCount', {}).get('short', 'N/A'),
-                "channel": v.get('channel', {}).get('name', 'Unknown')
+                "views": v.get('views', 'N/A'),
+                "channel": v.get('channel', 'Unknown')
             })
         return parsed_results
     except Exception as e:
-        st.error(f"YouTube 搜尋連線失敗 (可能是雲端 IP 被暫時阻擋): {str(e)}")
+        st.error(f"YouTube 搜尋連線失敗: {str(e)}")
         return []
 
 def ask_gemini(prompt, model_ver):
