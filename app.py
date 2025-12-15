@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # 1. Page Config & Session State
 # =================================================
 st.set_page_config(
-    page_title="YouTube 戰略雷達 v4.0",
+    page_title="YouTube 戰略雷達 v4.1 (Debug版)",
     page_icon="🎬",
     layout="wide"
 )
@@ -24,7 +24,7 @@ if 'search_results' not in st.session_state:
 if 'landscape_analysis' not in st.session_state:
     st.session_state.landscape_analysis = None
 
-st.title("🎬 YouTube 戰略雷達 v4.0")
+st.title("🎬 YouTube 戰略雷達 v4.1 (Debug Mode)")
 st.markdown("""
 ### Private Content Weapon: YT Narrative Strategy
 **Phase 1: 搜尋意圖偵察 (Landscape) → Phase 2: 競品深度解構 (Deep Dive)**
@@ -40,7 +40,6 @@ with st.sidebar:
 
     st.divider()
     st.header("🧠 模型設定")
-    # 優先使用您指定的新版模型
     MODEL_NAME = st.selectbox(
         "分析模型",
         ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-pro-preview"],
@@ -75,60 +74,72 @@ def get_video_transcripts(video_id):
         return "" # 無法抓取字幕（可能未提供或被停用）
 
 def fetch_youtube_data(api_key, keyword, max_results):
-    """第一階段：搜尋並獲取基本資料 + 字幕"""
-    youtube = build('youtube', 'v3', developerKey=api_key)
-    
-    # 1. 搜尋影片 ID
-    search_response = youtube.search().list(
-        q=keyword,
-        part='id,snippet',
-        maxResults=max_results,
-        type='video',
-        regionCode=REGION_CODE,
-        relevanceLanguage=RELEVANCE_LANG
-    ).execute()
-
-    video_ids = [item['id']['videoId'] for item in search_response['items']]
-    videos_data = []
-
-    # 2. 獲取影片詳細數據 (統計數據)
-    stats_response = youtube.videos().list(
-        part='statistics,contentDetails,snippet',
-        id=','.join(video_ids)
-    ).execute()
-
-    # 3. 整合數據並並行抓取字幕
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        future_to_vid = {executor.submit(get_video_transcripts, vid): vid for vid in video_ids}
+    """第一階段：搜尋並獲取基本資料 + 字幕 (含錯誤捕捉)"""
+    try:
+        youtube = build('youtube', 'v3', developerKey=api_key)
         
-        transcripts_map = {}
-        for future in as_completed(future_to_vid):
-            vid = future_to_vid[future]
-            transcripts_map[vid] = future.result()
+        # 1. 搜尋影片 ID
+        search_response = youtube.search().list(
+            q=keyword,
+            part='id,snippet',
+            maxResults=max_results,
+            type='video',
+            regionCode=REGION_CODE,
+            relevanceLanguage=RELEVANCE_LANG
+        ).execute()
 
-    for item in stats_response['items']:
-        vid = item['id']
-        snippet = item['snippet']
-        stats = item['statistics']
+        video_ids = [item['id']['videoId'] for item in search_response['items']]
         
-        # 處理過長的描述
-        full_desc = snippet.get('description', '')
-        
-        videos_data.append({
-            "VideoID": vid,
-            "Title": snippet.get('title'),
-            "Channel": snippet.get('channelTitle'),
-            "PublishDate": snippet.get('publishedAt')[:10],
-            "Views": int(stats.get('viewCount', 0)),
-            "Likes": int(stats.get('likeCount', 0)),
-            "Comments": int(stats.get('commentCount', 0)),
-            "URL": f"https://www.youtube.com/watch?v={vid}",
-            "Description": full_desc,
-            "HasCC": "✅" if transcripts_map.get(vid) else "❌",
-            "Transcript_Full": transcripts_map.get(vid, "")
-        })
+        if not video_ids:
+            st.warning("⚠️ 找不到任何相關影片，請嘗試更換關鍵字或放寬搜尋條件。")
+            return None
 
-    return pd.DataFrame(videos_data)
+        videos_data = []
+
+        # 2. 獲取影片詳細數據 (統計數據)
+        stats_response = youtube.videos().list(
+            part='statistics,contentDetails,snippet',
+            id=','.join(video_ids)
+        ).execute()
+
+        # 3. 整合數據並並行抓取字幕
+        # 使用 ThreadPool 加速字幕下載
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            future_to_vid = {executor.submit(get_video_transcripts, vid): vid for vid in video_ids}
+            
+            transcripts_map = {}
+            for future in as_completed(future_to_vid):
+                vid = future_to_vid[future]
+                transcripts_map[vid] = future.result()
+
+        for item in stats_response['items']:
+            vid = item['id']
+            snippet = item['snippet']
+            stats = item['statistics']
+            
+            # 處理過長的描述
+            full_desc = snippet.get('description', '')
+            
+            videos_data.append({
+                "VideoID": vid,
+                "Title": snippet.get('title'),
+                "Channel": snippet.get('channelTitle'),
+                "PublishDate": snippet.get('publishedAt')[:10],
+                "Views": int(stats.get('viewCount', 0)),
+                "Likes": int(stats.get('likeCount', 0)),
+                "Comments": int(stats.get('commentCount', 0)),
+                "URL": f"https://www.youtube.com/watch?v={vid}",
+                "Description": full_desc,
+                "HasCC": "✅" if transcripts_map.get(vid) else "❌",
+                "Transcript_Full": transcripts_map.get(vid, "")
+            })
+
+        return pd.DataFrame(videos_data)
+
+    except Exception as e:
+        st.error(f"❌ YouTube API 連線錯誤：{str(e)}")
+        st.info("💡 常見原因：\n1. API Key 未啟用 'YouTube Data API v3'\n2. API Key 複製錯誤\n3. 每日配額已滿")
+        return None
 
 def analyze_landscape(api_key, model_name, keyword, df):
     """Phase 1 分析：搜尋意圖與戰場概況"""
@@ -233,13 +244,19 @@ with col2:
 # --- Phase 1 Execution ---
 if search_btn and keyword_input and YOUTUBE_API_KEY and GEMINI_API_KEY:
     with st.spinner("正在爬取 YouTube 資料、下載字幕並進行初步分析..."):
-        # 1. 爬取
-        df = fetch_youtube_data(YOUTUBE_API_KEY, keyword_input, MAX_RESULTS)
-        st.session_state.search_results = df
+        # 1. 爬取 (如果失敗會回傳 None)
+        df_result = fetch_youtube_data(YOUTUBE_API_KEY, keyword_input, MAX_RESULTS)
         
-        # 2. 分析
-        analysis = analyze_landscape(GEMINI_API_KEY, MODEL_NAME, keyword_input, df)
-        st.session_state.landscape_analysis = analysis
+        if df_result is not None:
+            st.session_state.search_results = df_result
+            
+            # 2. 分析
+            analysis = analyze_landscape(GEMINI_API_KEY, MODEL_NAME, keyword_input, df_result)
+            st.session_state.landscape_analysis = analysis
+        else:
+            # 如果爬取失敗，清空之前的結果避免混淆
+            st.session_state.search_results = None
+            st.session_state.landscape_analysis = None
 
 # --- Phase 1 Display ---
 if st.session_state.search_results is not None:
@@ -258,7 +275,7 @@ if st.session_state.search_results is not None:
                 st.markdown(f"**🔥 內容飽和度**\n\n{analysis.get('Content_Saturation', 'N/A')}")
                 st.markdown(f"**🎣 封面與標題策略**\n\n{analysis.get('Thumbnail_Strategy', 'N/A')}")
     elif analysis:
-        st.error(f"分析錯誤: {analysis.get('error')}")
+        st.error(f"AI 分析發生錯誤: {analysis.get('error')}")
 
     st.divider()
     
@@ -344,4 +361,5 @@ if st.session_state.search_results is not None:
     )
 
 elif st.session_state.search_results is None and search_btn:
-    st.warning("尚未執行搜尋或無結果。")
+    # 這裡通常是 API 錯誤發生後會走到的地方，因為 df_result 為 None
+    pass
