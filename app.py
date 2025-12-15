@@ -15,6 +15,9 @@ st.set_page_config(
     layout="wide"
 )
 
+# 固定爬字幕用的模型（低成本）
+TRANSCRIPT_MODEL = "gemini-2.5-flash"
+
 # 側邊欄配置
 with st.sidebar:
     st.header("🔑 API 金鑰設定")
@@ -23,7 +26,12 @@ with st.sidebar:
     
     st.markdown("---")
     st.markdown("**分析模型設定**")
-    MODEL_VERSION = st.selectbox("Gemini 模型", ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"])
+    MODEL_VERSION = st.selectbox(
+        "策略分析模型", 
+        ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
+        help="用於意圖分析與策略生成"
+    )
+    st.caption(f"💡 字幕爬取固定使用 `{TRANSCRIPT_MODEL}`")
     
     st.markdown("---")
     st.markdown("**搜尋設定**")
@@ -32,7 +40,6 @@ with st.sidebar:
     
     st.markdown("---")
     st.markdown("**流程進度**")
-    # 動態顯示進度
     step1_done = "search_results" in st.session_state and st.session_state.search_results
     step2_done = "video_analyses" in st.session_state and st.session_state.video_analyses
     step3_done = "final_strategy" in st.session_state and st.session_state.final_strategy
@@ -124,10 +131,10 @@ def search_multiple_keywords(api_key, keywords_list, max_results_per_keyword):
 # 3. AI 分析函式
 # ==========================================
 
-def extract_video_content_via_ai(api_key, video_info, model_version):
-    """用 AI 直接爬取單支 YouTube 影片的內容摘要"""
+def extract_video_content_via_ai(api_key, video_info):
+    """用 AI 直接爬取單支 YouTube 影片的內容摘要（固定使用 flash 模型）"""
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(model_version)
+    model = genai.GenerativeModel(TRANSCRIPT_MODEL)  # 強制使用低階模型
     
     video_url = video_info['url']
     video_title = video_info['title']
@@ -170,13 +177,13 @@ def extract_video_content_via_ai(api_key, video_info, model_version):
             'success': False
         }
 
-def batch_extract_videos(api_key, videos_list, model_version, max_workers=3):
-    """批次爬取多支影片"""
+def batch_extract_videos(api_key, videos_list, max_workers=3):
+    """批次爬取多支影片（固定使用 flash 模型）"""
     results = []
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_video = {
-            executor.submit(extract_video_content_via_ai, api_key, video, model_version): video 
+            executor.submit(extract_video_content_via_ai, api_key, video): video 
             for video in videos_list
         }
         
@@ -298,7 +305,7 @@ def generate_content_strategy(api_key, all_video_analyses, keywords_list, user_g
     return response.text
 
 # ==========================================
-# 4. 輔助函式：生成下載內容
+# 4. 輔助函式
 # ==========================================
 
 def generate_all_analyses_md(video_analyses):
@@ -328,18 +335,16 @@ st.title("🎯 YouTube 戰略內容切入分析儀")
 st.caption("支援多關鍵字搜尋 → AI 爬取字幕 → 綜合策略生成｜每個步驟結果皆可下載")
 
 # Session State 初始化
+if "confirmed_keywords" not in st.session_state:
+    st.session_state.confirmed_keywords = []  # 確認要搜尋的關鍵字列表
+if "suggestions_cache" not in st.session_state:
+    st.session_state.suggestions_cache = {}  # 已取得的建議快取 {keyword: [suggestions]}
 if "search_results" not in st.session_state:
     st.session_state.search_results = []
 if "intent_analysis" not in st.session_state:
     st.session_state.intent_analysis = ""
 if "video_analyses" not in st.session_state:
     st.session_state.video_analyses = []
-if "final_keywords" not in st.session_state:
-    st.session_state.final_keywords = []
-if "suggestions_dict" not in st.session_state:
-    st.session_state.suggestions_dict = {}
-if "selected_video_ids" not in st.session_state:
-    st.session_state.selected_video_ids = []
 if "final_strategy" not in st.session_state:
     st.session_state.final_strategy = ""
 if "user_goal" not in st.session_state:
@@ -351,86 +356,153 @@ if "user_goal" not in st.session_state:
 st.header("STEP 1｜關鍵字搜尋與市場意圖分析")
 
 with st.container(border=True):
-    # 1-1: 輸入關鍵字
-    st.subheader("1-1. 輸入關鍵字")
-    keywords_input = st.text_area(
-        "每行一個關鍵字，或用逗號分隔",
-        placeholder="AI 影片生成\nAI 剪輯工具\nYouTube 自動化",
-        height=100,
-        key="keywords_input"
-    )
+    st.subheader("1-1. 輸入與管理關鍵字")
     
-    # 解析關鍵字
-    input_keywords = []
-    if keywords_input:
-        for line in keywords_input.replace('，', ',').split('\n'):
-            for kw in line.split(','):
-                kw = kw.strip()
-                if kw:
-                    input_keywords.append(kw)
+    col_input, col_action = st.columns([3, 1])
     
-    if input_keywords:
-        st.caption(f"已輸入 {len(input_keywords)} 個關鍵字：{', '.join(input_keywords)}")
-
-with st.container(border=True):
-    # 1-2: 建議關鍵字
-    st.subheader("1-2. 取得 YouTube 建議關鍵字（選用）")
+    with col_input:
+        new_keywords_input = st.text_area(
+            "新增關鍵字（每行一個，或用逗號分隔）",
+            placeholder="AI 影片生成\nAI 剪輯工具\nYouTube 自動化",
+            height=80,
+            key="new_keywords_input"
+        )
     
-    col_sug1, col_sug2 = st.columns([1, 3])
-    with col_sug1:
-        fetch_suggestions_btn = st.button("🔍 取得建議", disabled=not input_keywords)
+    with col_action:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("➕ 加入關鍵字列表", type="primary"):
+            if new_keywords_input:
+                new_kws = []
+                for line in new_keywords_input.replace('，', ',').split('\n'):
+                    for kw in line.split(','):
+                        kw = kw.strip()
+                        if kw and kw not in st.session_state.confirmed_keywords:
+                            new_kws.append(kw)
+                
+                if new_kws:
+                    st.session_state.confirmed_keywords.extend(new_kws)
+                    st.success(f"已加入 {len(new_kws)} 個關鍵字")
+                    st.rerun()
+                else:
+                    st.warning("沒有新的關鍵字可加入")
     
-    if fetch_suggestions_btn and input_keywords:
-        suggestions_dict = {}
-        with st.spinner("正在取得建議關鍵字..."):
-            for kw in input_keywords:
-                suggestions = get_youtube_suggestions(kw)
-                if suggestions:
-                    suggestions_dict[kw] = suggestions
-        st.session_state.suggestions_dict = suggestions_dict
-
-    # 顯示並勾選建議
-    selected_suggestions = []
-    if st.session_state.suggestions_dict:
-        for base_kw, suggestions in st.session_state.suggestions_dict.items():
-            st.markdown(f"**{base_kw}** 的延伸：")
-            cols = st.columns(4)
-            for i, sug in enumerate(suggestions[:8]):
-                with cols[i % 4]:
-                    if st.checkbox(sug, key=f"sug_{base_kw}_{i}"):
-                        selected_suggestions.append(sug)
+    # 顯示目前關鍵字列表
+    if st.session_state.confirmed_keywords:
+        st.markdown("**📋 目前關鍵字列表：**")
         
-        if selected_suggestions:
-            st.caption(f"已選擇 {len(selected_suggestions)} 個建議關鍵字")
+        # 用 tag 樣式顯示，每個可刪除
+        cols = st.columns(6)
+        keywords_to_remove = []
+        
+        for idx, kw in enumerate(st.session_state.confirmed_keywords):
+            with cols[idx % 6]:
+                col_tag, col_x = st.columns([4, 1])
+                with col_tag:
+                    st.markdown(f"`{kw}`")
+                with col_x:
+                    if st.button("✕", key=f"del_{idx}", help=f"移除 {kw}"):
+                        keywords_to_remove.append(kw)
+        
+        # 執行刪除
+        if keywords_to_remove:
+            for kw in keywords_to_remove:
+                st.session_state.confirmed_keywords.remove(kw)
+            st.rerun()
+        
+        # 清空全部
+        if st.button("🗑️ 清空全部關鍵字"):
+            st.session_state.confirmed_keywords = []
+            st.session_state.suggestions_cache = {}
+            st.rerun()
+    else:
+        st.info("尚未加入任何關鍵字，請在上方輸入")
 
 with st.container(border=True):
-    # 1-3: 執行搜尋
+    st.subheader("1-2. 取得 YouTube 建議關鍵字")
+    st.caption("勾選建議關鍵字會自動加入列表，可再次取得更多建議")
+    
+    if st.session_state.confirmed_keywords:
+        # 找出還沒取得建議的關鍵字
+        keywords_without_suggestions = [
+            kw for kw in st.session_state.confirmed_keywords 
+            if kw not in st.session_state.suggestions_cache
+        ]
+        
+        col_btn1, col_btn2, col_info = st.columns([1, 1, 2])
+        
+        with col_btn1:
+            if st.button("🔍 取得新關鍵字的建議", disabled=not keywords_without_suggestions):
+                with st.spinner(f"正在取得 {len(keywords_without_suggestions)} 個關鍵字的建議..."):
+                    for kw in keywords_without_suggestions:
+                        suggestions = get_youtube_suggestions(kw)
+                        st.session_state.suggestions_cache[kw] = suggestions
+                st.rerun()
+        
+        with col_btn2:
+            if st.button("🔄 重新取得全部建議"):
+                with st.spinner("正在重新取得所有建議..."):
+                    st.session_state.suggestions_cache = {}
+                    for kw in st.session_state.confirmed_keywords:
+                        suggestions = get_youtube_suggestions(kw)
+                        st.session_state.suggestions_cache[kw] = suggestions
+                st.rerun()
+        
+        with col_info:
+            if keywords_without_suggestions:
+                st.caption(f"⚡ {len(keywords_without_suggestions)} 個關鍵字尚未取得建議")
+            else:
+                st.caption("✅ 所有關鍵字都已取得建議")
+        
+        # 顯示建議關鍵字供勾選
+        if st.session_state.suggestions_cache:
+            st.markdown("---")
+            
+            for base_kw, suggestions in st.session_state.suggestions_cache.items():
+                if suggestions:
+                    # 過濾掉已經在列表中的建議
+                    available_suggestions = [
+                        s for s in suggestions 
+                        if s not in st.session_state.confirmed_keywords
+                    ]
+                    
+                    if available_suggestions:
+                        st.markdown(f"**{base_kw}** 的延伸建議：")
+                        cols = st.columns(4)
+                        for i, sug in enumerate(available_suggestions[:8]):
+                            with cols[i % 4]:
+                                if st.button(f"➕ {sug}", key=f"add_sug_{base_kw}_{i}"):
+                                    if sug not in st.session_state.confirmed_keywords:
+                                        st.session_state.confirmed_keywords.append(sug)
+                                        st.rerun()
+                    else:
+                        st.caption(f"**{base_kw}**：所有建議都已加入列表")
+    else:
+        st.warning("請先在上方加入關鍵字")
+
+with st.container(border=True):
     st.subheader("1-3. 執行搜尋")
     
-    final_keywords = list(set(input_keywords + selected_suggestions))
-    
-    if final_keywords:
-        st.info(f"🎯 最終搜尋關鍵字 ({len(final_keywords)} 個)：{', '.join(final_keywords)}")
+    if st.session_state.confirmed_keywords:
+        st.info(f"🎯 將搜尋 {len(st.session_state.confirmed_keywords)} 個關鍵字")
         
         if st.button("🚀 執行批次搜尋與意圖分析", type="primary"):
             if not GEMINI_API_KEY or not YOUTUBE_API_KEY:
                 st.error("請先在左側設定 API Key")
             else:
-                with st.spinner(f"正在搜尋 {len(final_keywords)} 個關鍵字..."):
+                with st.spinner(f"正在搜尋 {len(st.session_state.confirmed_keywords)} 個關鍵字..."):
                     results = search_multiple_keywords(
                         YOUTUBE_API_KEY, 
-                        final_keywords, 
+                        st.session_state.confirmed_keywords, 
                         MAX_RESULTS_PER_KEYWORD
                     )
                     st.session_state.search_results = results
-                    st.session_state.final_keywords = final_keywords
                     st.session_state.video_analyses = []
                     st.session_state.final_strategy = ""
                     
                     if results:
                         analysis = analyze_search_intent(
                             GEMINI_API_KEY, 
-                            final_keywords, 
+                            st.session_state.confirmed_keywords, 
                             results, 
                             MODEL_VERSION
                         )
@@ -439,7 +511,7 @@ with st.container(border=True):
                     else:
                         st.warning("找不到相關影片")
     else:
-        st.warning("請先輸入至少一個關鍵字")
+        st.warning("請先加入至少一個關鍵字")
 
 # 顯示意圖分析結果
 if st.session_state.intent_analysis:
@@ -447,7 +519,6 @@ if st.session_state.intent_analysis:
         st.subheader("📊 市場意圖分析報告")
         st.markdown(st.session_state.intent_analysis)
         
-        # 下載按鈕
         st.download_button(
             "📥 下載意圖分析報告",
             st.session_state.intent_analysis,
@@ -461,6 +532,7 @@ if st.session_state.intent_analysis:
 if st.session_state.search_results:
     st.markdown("---")
     st.header("STEP 2｜選擇競品 & AI 爬取影片內容")
+    st.caption(f"💡 字幕爬取使用 `{TRANSCRIPT_MODEL}` 模型（低成本）")
     
     with st.container(border=True):
         st.subheader("2-1. 選擇要分析的競品影片")
@@ -485,7 +557,7 @@ if st.session_state.search_results:
                         title_display = video['title'][:35] + "..." if len(video['title']) > 35 else video['title']
                         st.markdown(f"**{title_display}**")
                         st.caption(f"👀 {video['view_count']:,} | [觀看]({video['url']})")
-                        if st.checkbox("納入分析", key=f"vid_{video['id']}"):
+                        if st.checkbox("納入", key=f"vid_{video['id']}"):
                             selected_videos.append(video)
         
         st.markdown(f"### ✅ 已選擇 {len(selected_videos)} 個競品")
@@ -500,12 +572,11 @@ if st.session_state.search_results:
                 else:
                     progress_bar = st.progress(0)
                     status_text = st.empty()
-                    status_text.info(f"正在爬取 {len(selected_videos)} 支影片...")
+                    status_text.info(f"正在使用 {TRANSCRIPT_MODEL} 爬取 {len(selected_videos)} 支影片...")
                     
                     analyses = batch_extract_videos(
                         GEMINI_API_KEY, 
-                        selected_videos, 
-                        MODEL_VERSION,
+                        selected_videos,
                         max_workers=MAX_CONCURRENT_AI
                     )
                     
@@ -534,7 +605,6 @@ if st.session_state.search_results:
                     st.markdown("---")
                     st.markdown(analysis['ai_analysis'])
                     
-                    # 單支影片下載
                     single_content = f"# {analysis['title']}\n\n"
                     single_content += f"- 網址: {analysis['url']}\n"
                     single_content += f"- 觀看數: {analysis['view_count']:,}\n"
@@ -549,7 +619,6 @@ if st.session_state.search_results:
                         key=f"dl_{analysis['video_id']}"
                     )
             
-            # 全部下載
             st.markdown("---")
             all_analyses_md = generate_all_analyses_md(st.session_state.video_analyses)
             st.download_button(
@@ -579,26 +648,25 @@ if st.session_state.video_analyses:
     
     with st.container(border=True):
         st.subheader("3-2. 生成策略")
+        st.caption(f"使用 `{MODEL_VERSION}` 模型生成策略")
         
         if st.button("🚀 生成綜合策略報告", type="primary"):
             with st.spinner("正在整合所有分析，生成策略報告..."):
                 strategy = generate_content_strategy(
                     GEMINI_API_KEY,
                     st.session_state.video_analyses,
-                    st.session_state.final_keywords,
+                    st.session_state.confirmed_keywords,
                     user_goal,
                     MODEL_VERSION
                 )
                 st.session_state.final_strategy = strategy
                 st.rerun()
     
-    # 顯示策略報告
     if st.session_state.final_strategy:
         with st.container(border=True):
             st.subheader("🎯 綜合策略報告")
             st.markdown(st.session_state.final_strategy)
             
-            # 下載策略報告
             st.download_button(
                 "📥 下載策略報告",
                 st.session_state.final_strategy,
@@ -615,10 +683,9 @@ if st.session_state.final_strategy:
     st.header("📦 一鍵下載全部")
     
     with st.container(border=True):
-        # 組合所有內容
         full_report = f"# YouTube 戰略內容分析完整報告\n\n"
         full_report += f"生成時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-        full_report += f"研究關鍵字：{', '.join(st.session_state.final_keywords)}\n\n"
+        full_report += f"研究關鍵字：{', '.join(st.session_state.confirmed_keywords)}\n\n"
         full_report += "---\n\n"
         
         full_report += "# PART 1: 市場意圖分析\n\n"
