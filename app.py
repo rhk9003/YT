@@ -144,6 +144,12 @@ with st.sidebar:
     step2_done = "video_analyses" in st.session_state and (st.session_state.video_analyses.get('zh') or st.session_state.video_analyses.get('en'))
     step3_done = "strategy_results" in st.session_state and st.session_state.strategy_results
     
+    # 顯示關鍵字數量
+    zh_count = len(st.session_state.get('zh_keywords', []))
+    en_count = len(st.session_state.get('en_keywords', []))
+    if zh_count or en_count:
+        st.caption(f"📝 關鍵字：🇹🇼 {zh_count} 個 | 🇺🇸 {en_count} 個")
+    
     st.markdown(f"{'✅' if step1_done else '⬜'} STEP 1: 搜尋與意圖分析")
     st.markdown(f"{'✅' if step2_done else '⬜'} STEP 2: AI 爬取影片內容")
     st.markdown(f"{'✅' if step3_done else '⬜'} STEP 3: 策略模組分析")
@@ -580,12 +586,14 @@ st.title("🎯 YouTube 戰略內容切入分析儀 v3")
 st.caption("支援多關鍵字搜尋 → 中英雙語市場比對 → AI 爬取字幕 → 模組化策略生成")
 
 # Session State 初始化
-if "confirmed_keywords" not in st.session_state:
-    st.session_state.confirmed_keywords = []
-if "english_keywords" not in st.session_state:
-    st.session_state.english_keywords = {}  # {zh_keyword: en_keyword}
-if "suggestions_cache" not in st.session_state:
-    st.session_state.suggestions_cache = {}
+if "zh_keywords" not in st.session_state:
+    st.session_state.zh_keywords = []  # 中文關鍵字列表
+if "en_keywords" not in st.session_state:
+    st.session_state.en_keywords = []  # 英文關鍵字列表（獨立管理）
+if "zh_suggestions_cache" not in st.session_state:
+    st.session_state.zh_suggestions_cache = {}  # {zh_keyword: [suggestions]}
+if "en_suggestions_cache" not in st.session_state:
+    st.session_state.en_suggestions_cache = {}  # {en_keyword: [suggestions]}
 if "search_results" not in st.session_state:
     st.session_state.search_results = {'zh': [], 'en': []}
 if "intent_analysis" not in st.session_state:
@@ -602,132 +610,194 @@ if "user_goal" not in st.session_state:
 # ============================================================
 st.header("STEP 1｜關鍵字搜尋與市場意圖分析")
 
+# --- 1-1: 中文關鍵字管理 ---
 with st.container(border=True):
-    st.subheader("1-1. 輸入與管理關鍵字")
+    st.subheader("1-1. 🇹🇼 中文關鍵字")
     
     col_input, col_action = st.columns([3, 1])
     
     with col_input:
-        new_keywords_input = st.text_area(
-            "新增關鍵字（每行一個，或用逗號分隔）",
+        zh_keywords_input = st.text_area(
+            "新增中文關鍵字（每行一個，或用逗號分隔）",
             placeholder="AI 影片生成\nAI 剪輯工具\nYouTube 自動化",
             height=80,
-            key="new_keywords_input"
+            key="zh_keywords_input"
         )
     
     with col_action:
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("➕ 加入關鍵字列表", type="primary"):
-            if new_keywords_input:
+        if st.button("➕ 加入中文列表", type="primary", key="add_zh"):
+            if zh_keywords_input:
                 new_kws = []
-                for line in new_keywords_input.replace('，', ',').split('\n'):
+                for line in zh_keywords_input.replace('，', ',').split('\n'):
                     for kw in line.split(','):
                         kw = kw.strip()
-                        if kw and kw not in st.session_state.confirmed_keywords:
+                        if kw and kw not in st.session_state.zh_keywords:
                             new_kws.append(kw)
                 
                 if new_kws:
-                    st.session_state.confirmed_keywords.extend(new_kws)
-                    st.success(f"已加入 {len(new_kws)} 個關鍵字")
+                    st.session_state.zh_keywords.extend(new_kws)
+                    st.success(f"已加入 {len(new_kws)} 個中文關鍵字")
                     st.rerun()
                 else:
                     st.warning("沒有新的關鍵字可加入")
     
-    # 顯示目前關鍵字列表
-    if st.session_state.confirmed_keywords:
-        st.markdown("**📋 目前關鍵字列表：**")
+    # 顯示中文關鍵字列表
+    if st.session_state.zh_keywords:
+        st.markdown("**📋 中文關鍵字列表：**")
         
         cols = st.columns(6)
-        keywords_to_remove = []
+        zh_to_remove = []
         
-        for idx, kw in enumerate(st.session_state.confirmed_keywords):
+        for idx, kw in enumerate(st.session_state.zh_keywords):
             with cols[idx % 6]:
                 col_tag, col_x = st.columns([4, 1])
                 with col_tag:
-                    en_kw = st.session_state.english_keywords.get(kw, "")
-                    if en_kw and ENABLE_ENGLISH:
-                        st.markdown(f"`{kw}`\n`🇺🇸 {en_kw}`")
-                    else:
-                        st.markdown(f"`{kw}`")
+                    st.markdown(f"`{kw}`")
                 with col_x:
-                    if st.button("✕", key=f"del_{idx}", help=f"移除 {kw}"):
-                        keywords_to_remove.append(kw)
+                    if st.button("✕", key=f"del_zh_{idx}", help=f"移除 {kw}"):
+                        zh_to_remove.append(kw)
         
-        if keywords_to_remove:
-            for kw in keywords_to_remove:
-                st.session_state.confirmed_keywords.remove(kw)
-                if kw in st.session_state.english_keywords:
-                    del st.session_state.english_keywords[kw]
+        if zh_to_remove:
+            for kw in zh_to_remove:
+                st.session_state.zh_keywords.remove(kw)
             st.rerun()
         
-        col_clear, col_translate = st.columns(2)
-        with col_clear:
-            if st.button("🗑️ 清空全部關鍵字"):
-                st.session_state.confirmed_keywords = []
-                st.session_state.english_keywords = {}
-                st.session_state.suggestions_cache = {}
-                st.rerun()
-        
-        with col_translate:
-            if ENABLE_ENGLISH:
-                untranslated = [kw for kw in st.session_state.confirmed_keywords if kw not in st.session_state.english_keywords]
-                if untranslated:
-                    if st.button(f"🌐 翻譯關鍵字為英文 ({len(untranslated)} 個)"):
-                        if GEMINI_API_KEY:
-                            with st.spinner("正在翻譯關鍵字..."):
-                                translations = batch_translate_keywords(GEMINI_API_KEY, untranslated)
-                                st.session_state.english_keywords.update(translations)
-                            st.rerun()
-                        else:
-                            st.error("請先設定 Gemini API Key")
-                else:
-                    st.success("✅ 所有關鍵字已翻譯")
+        if st.button("🗑️ 清空中文關鍵字", key="clear_zh"):
+            st.session_state.zh_keywords = []
+            st.session_state.zh_suggestions_cache = {}
+            st.rerun()
     else:
-        st.info("尚未加入任何關鍵字，請在上方輸入")
+        st.info("尚未加入任何中文關鍵字")
 
+# --- 1-2: 英文關鍵字管理（如果啟用）---
+if ENABLE_ENGLISH:
+    with st.container(border=True):
+        st.subheader("1-2. 🇺🇸 英文關鍵字")
+        st.caption("英文市場的搜尋習慣可能與中文不同，建議獨立管理")
+        
+        col_input_en, col_action_en = st.columns([3, 1])
+        
+        with col_input_en:
+            en_keywords_input = st.text_area(
+                "新增英文關鍵字（每行一個，或用逗號分隔）",
+                placeholder="AI video editing\nAI video generator\nYouTube automation",
+                height=80,
+                key="en_keywords_input"
+            )
+        
+        with col_action_en:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("➕ 加入英文列表", type="primary", key="add_en"):
+                if en_keywords_input:
+                    new_kws = []
+                    for line in en_keywords_input.replace('，', ',').split('\n'):
+                        for kw in line.split(','):
+                            kw = kw.strip()
+                            if kw and kw not in st.session_state.en_keywords:
+                                new_kws.append(kw)
+                    
+                    if new_kws:
+                        st.session_state.en_keywords.extend(new_kws)
+                        st.success(f"已加入 {len(new_kws)} 個英文關鍵字")
+                        st.rerun()
+                    else:
+                        st.warning("沒有新的關鍵字可加入")
+        
+        # 從中文翻譯產生英文關鍵字
+        if st.session_state.zh_keywords:
+            st.markdown("---")
+            st.markdown("**🔄 從中文關鍵字翻譯：**")
+            if st.button("🌐 將中文關鍵字翻譯成英文並加入", key="translate_to_en"):
+                if GEMINI_API_KEY:
+                    with st.spinner("正在翻譯..."):
+                        translations = batch_translate_keywords(GEMINI_API_KEY, st.session_state.zh_keywords)
+                        new_en = []
+                        for zh_kw, en_kw in translations.items():
+                            if en_kw not in st.session_state.en_keywords:
+                                st.session_state.en_keywords.append(en_kw)
+                                new_en.append(en_kw)
+                        if new_en:
+                            st.success(f"已翻譯並加入 {len(new_en)} 個英文關鍵字")
+                        else:
+                            st.info("翻譯結果都已存在於列表中")
+                    st.rerun()
+                else:
+                    st.error("請先設定 Gemini API Key")
+        
+        # 顯示英文關鍵字列表
+        if st.session_state.en_keywords:
+            st.markdown("**📋 英文關鍵字列表：**")
+            
+            cols = st.columns(6)
+            en_to_remove = []
+            
+            for idx, kw in enumerate(st.session_state.en_keywords):
+                with cols[idx % 6]:
+                    col_tag, col_x = st.columns([4, 1])
+                    with col_tag:
+                        st.markdown(f"`{kw}`")
+                    with col_x:
+                        if st.button("✕", key=f"del_en_{idx}", help=f"移除 {kw}"):
+                            en_to_remove.append(kw)
+            
+            if en_to_remove:
+                for kw in en_to_remove:
+                    st.session_state.en_keywords.remove(kw)
+                st.rerun()
+            
+            if st.button("🗑️ 清空英文關鍵字", key="clear_en"):
+                st.session_state.en_keywords = []
+                st.session_state.en_suggestions_cache = {}
+                st.rerun()
+        else:
+            st.info("尚未加入任何英文關鍵字，可手動輸入或從中文翻譯")
+
+# --- 1-3: 中文 YouTube 建議關鍵字 ---
 with st.container(border=True):
-    st.subheader("1-2. 取得 YouTube 建議關鍵字")
-    st.caption("勾選建議關鍵字會自動加入列表")
+    st.subheader(f"1-{'3' if ENABLE_ENGLISH else '2'}. 🇹🇼 中文 YouTube 建議關鍵字")
+    st.caption("根據 YouTube 自動完成功能取得熱門搜尋詞")
     
-    if st.session_state.confirmed_keywords:
-        keywords_without_suggestions = [
-            kw for kw in st.session_state.confirmed_keywords 
-            if kw not in st.session_state.suggestions_cache
+    if st.session_state.zh_keywords:
+        zh_without_suggestions = [
+            kw for kw in st.session_state.zh_keywords 
+            if kw not in st.session_state.zh_suggestions_cache
         ]
         
         col_btn1, col_btn2, col_info = st.columns([1, 1, 2])
         
         with col_btn1:
-            if st.button("🔍 取得新關鍵字的建議", disabled=not keywords_without_suggestions):
-                with st.spinner(f"正在取得 {len(keywords_without_suggestions)} 個關鍵字的建議..."):
-                    for kw in keywords_without_suggestions:
-                        suggestions = get_youtube_suggestions(kw)
-                        st.session_state.suggestions_cache[kw] = suggestions
+            if st.button("🔍 取得中文建議", disabled=not zh_without_suggestions, key="get_zh_sug"):
+                with st.spinner(f"正在取得 {len(zh_without_suggestions)} 個關鍵字的中文建議..."):
+                    for kw in zh_without_suggestions:
+                        suggestions = get_youtube_suggestions(kw, lang="zh-TW")
+                        st.session_state.zh_suggestions_cache[kw] = suggestions
                 st.rerun()
         
         with col_btn2:
-            if st.button("🔄 重新取得全部建議"):
-                with st.spinner("正在重新取得所有建議..."):
-                    st.session_state.suggestions_cache = {}
-                    for kw in st.session_state.confirmed_keywords:
-                        suggestions = get_youtube_suggestions(kw)
-                        st.session_state.suggestions_cache[kw] = suggestions
+            if st.button("🔄 重新取得全部", key="refresh_zh_sug"):
+                with st.spinner("正在重新取得所有中文建議..."):
+                    st.session_state.zh_suggestions_cache = {}
+                    for kw in st.session_state.zh_keywords:
+                        suggestions = get_youtube_suggestions(kw, lang="zh-TW")
+                        st.session_state.zh_suggestions_cache[kw] = suggestions
                 st.rerun()
         
         with col_info:
-            if keywords_without_suggestions:
-                st.caption(f"⚡ {len(keywords_without_suggestions)} 個關鍵字尚未取得建議")
+            if zh_without_suggestions:
+                st.caption(f"⚡ {len(zh_without_suggestions)} 個關鍵字尚未取得建議")
             else:
-                st.caption("✅ 所有關鍵字都已取得建議")
+                st.caption("✅ 所有中文關鍵字都已取得建議")
         
-        if st.session_state.suggestions_cache:
+        # 顯示中文建議
+        if st.session_state.zh_suggestions_cache:
             st.markdown("---")
             
-            for base_kw, suggestions in st.session_state.suggestions_cache.items():
+            for base_kw, suggestions in st.session_state.zh_suggestions_cache.items():
                 if suggestions:
                     available_suggestions = [
                         s for s in suggestions 
-                        if s not in st.session_state.confirmed_keywords
+                        if s not in st.session_state.zh_keywords
                     ]
                     
                     if available_suggestions:
@@ -735,45 +805,115 @@ with st.container(border=True):
                         cols = st.columns(4)
                         for i, sug in enumerate(available_suggestions[:8]):
                             with cols[i % 4]:
-                                if st.button(f"➕ {sug}", key=f"add_sug_{base_kw}_{i}"):
-                                    if sug not in st.session_state.confirmed_keywords:
-                                        st.session_state.confirmed_keywords.append(sug)
+                                if st.button(f"➕ {sug}", key=f"add_zh_sug_{base_kw}_{i}"):
+                                    if sug not in st.session_state.zh_keywords:
+                                        st.session_state.zh_keywords.append(sug)
                                         st.rerun()
                     else:
                         st.caption(f"**{base_kw}**：所有建議都已加入列表")
     else:
-        st.warning("請先在上方加入關鍵字")
+        st.warning("請先加入中文關鍵字")
 
+# --- 1-4: 英文 YouTube 建議關鍵字（如果啟用）---
+if ENABLE_ENGLISH:
+    with st.container(border=True):
+        st.subheader("1-4. 🇺🇸 英文 YouTube 建議關鍵字")
+        st.caption("英文市場的熱門搜尋詞，可能與中文完全不同")
+        
+        if st.session_state.en_keywords:
+            en_without_suggestions = [
+                kw for kw in st.session_state.en_keywords 
+                if kw not in st.session_state.en_suggestions_cache
+            ]
+            
+            col_btn1, col_btn2, col_info = st.columns([1, 1, 2])
+            
+            with col_btn1:
+                if st.button("🔍 取得英文建議", disabled=not en_without_suggestions, key="get_en_sug"):
+                    with st.spinner(f"正在取得 {len(en_without_suggestions)} 個關鍵字的英文建議..."):
+                        for kw in en_without_suggestions:
+                            suggestions = get_youtube_suggestions(kw, lang="en")
+                            st.session_state.en_suggestions_cache[kw] = suggestions
+                    st.rerun()
+            
+            with col_btn2:
+                if st.button("🔄 重新取得全部", key="refresh_en_sug"):
+                    with st.spinner("正在重新取得所有英文建議..."):
+                        st.session_state.en_suggestions_cache = {}
+                        for kw in st.session_state.en_keywords:
+                            suggestions = get_youtube_suggestions(kw, lang="en")
+                            st.session_state.en_suggestions_cache[kw] = suggestions
+                    st.rerun()
+            
+            with col_info:
+                if en_without_suggestions:
+                    st.caption(f"⚡ {len(en_without_suggestions)} 個關鍵字尚未取得建議")
+                else:
+                    st.caption("✅ 所有英文關鍵字都已取得建議")
+            
+            # 顯示英文建議
+            if st.session_state.en_suggestions_cache:
+                st.markdown("---")
+                
+                for base_kw, suggestions in st.session_state.en_suggestions_cache.items():
+                    if suggestions:
+                        available_suggestions = [
+                            s for s in suggestions 
+                            if s not in st.session_state.en_keywords
+                        ]
+                        
+                        if available_suggestions:
+                            st.markdown(f"**{base_kw}** 的延伸建議：")
+                            cols = st.columns(4)
+                            for i, sug in enumerate(available_suggestions[:8]):
+                                with cols[i % 4]:
+                                    if st.button(f"➕ {sug}", key=f"add_en_sug_{base_kw}_{i}"):
+                                        if sug not in st.session_state.en_keywords:
+                                            st.session_state.en_keywords.append(sug)
+                                            st.rerun()
+                        else:
+                            st.caption(f"**{base_kw}**：所有建議都已加入列表")
+        else:
+            st.warning("請先加入英文關鍵字（可手動輸入或從中文翻譯）")
+
+# --- 1-5: 執行搜尋 ---
 with st.container(border=True):
-    st.subheader("1-3. 執行搜尋")
+    st.subheader(f"1-{'5' if ENABLE_ENGLISH else '3'}. 執行搜尋")
     
-    if st.session_state.confirmed_keywords:
-        search_info = f"🎯 將搜尋 {len(st.session_state.confirmed_keywords)} 個中文關鍵字"
-        if ENABLE_ENGLISH and st.session_state.english_keywords:
-            search_info += f" + {len(st.session_state.english_keywords)} 個英文關鍵字"
-        st.info(search_info)
+    has_zh = len(st.session_state.zh_keywords) > 0
+    has_en = ENABLE_ENGLISH and len(st.session_state.en_keywords) > 0
+    
+    if has_zh or has_en:
+        search_info_parts = []
+        if has_zh:
+            search_info_parts.append(f"🇹🇼 {len(st.session_state.zh_keywords)} 個中文關鍵字")
+        if has_en:
+            search_info_parts.append(f"🇺🇸 {len(st.session_state.en_keywords)} 個英文關鍵字")
+        st.info("🎯 將搜尋：" + " + ".join(search_info_parts))
         
         if st.button("🚀 執行批次搜尋與意圖分析", type="primary"):
             if not GEMINI_API_KEY or not YOUTUBE_API_KEY:
                 st.error("請先在左側設定 API Key")
             else:
-                # 搜尋中文市場
-                with st.spinner(f"正在搜尋中文市場..."):
-                    zh_results = search_multiple_keywords(
-                        YOUTUBE_API_KEY, 
-                        st.session_state.confirmed_keywords, 
-                        MAX_RESULTS_PER_KEYWORD,
-                        lang="zh"
-                    )
-                
-                # 搜尋英文市場（如果啟用）
+                zh_results = []
                 en_results = []
-                if ENABLE_ENGLISH and st.session_state.english_keywords:
-                    with st.spinner(f"正在搜尋英文市場..."):
-                        en_keywords = list(st.session_state.english_keywords.values())
+                
+                # 搜尋中文市場
+                if has_zh:
+                    with st.spinner(f"正在搜尋中文市場 ({len(st.session_state.zh_keywords)} 個關鍵字)..."):
+                        zh_results = search_multiple_keywords(
+                            YOUTUBE_API_KEY, 
+                            st.session_state.zh_keywords, 
+                            MAX_RESULTS_PER_KEYWORD,
+                            lang="zh"
+                        )
+                
+                # 搜尋英文市場
+                if has_en:
+                    with st.spinner(f"正在搜尋英文市場 ({len(st.session_state.en_keywords)} 個關鍵字)..."):
                         en_results = search_multiple_keywords(
                             YOUTUBE_API_KEY, 
-                            en_keywords, 
+                            st.session_state.en_keywords, 
                             MAX_RESULTS_PER_KEYWORD,
                             lang="en"
                         )
@@ -784,11 +924,10 @@ with st.container(border=True):
                 
                 if zh_results or en_results:
                     with st.spinner("正在分析搜尋意圖..."):
-                        en_keywords = list(st.session_state.english_keywords.values()) if ENABLE_ENGLISH else []
                         analysis = analyze_search_intent_bilingual(
                             GEMINI_API_KEY, 
-                            st.session_state.confirmed_keywords,
-                            en_keywords,
+                            st.session_state.zh_keywords,
+                            st.session_state.en_keywords if ENABLE_ENGLISH else [],
                             zh_results, 
                             en_results,
                             MODEL_VERSION
@@ -798,7 +937,7 @@ with st.container(border=True):
                 else:
                     st.warning("找不到相關影片")
     else:
-        st.warning("請先加入至少一個關鍵字")
+        st.warning("請先加入至少一個關鍵字（中文或英文）")
 
 # 顯示意圖分析結果
 if st.session_state.intent_analysis:
@@ -1010,8 +1149,8 @@ if all_analyses:
             if st.button("🚀 生成策略報告", type="primary"):
                 with st.spinner(f"正在同時執行 {len(selected_modules)} 個策略分析..."):
                     keywords_info = {
-                        'zh': st.session_state.confirmed_keywords,
-                        'en': list(st.session_state.english_keywords.values()) if st.session_state.english_keywords else []
+                        'zh': st.session_state.zh_keywords,
+                        'en': st.session_state.en_keywords if ENABLE_ENGLISH else []
                     }
                     
                     results = batch_generate_strategies(
@@ -1058,9 +1197,9 @@ if st.session_state.strategy_results:
     with st.container(border=True):
         full_report = f"# YouTube 戰略內容分析完整報告\n\n"
         full_report += f"生成時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-        full_report += f"研究關鍵字（中文）：{', '.join(st.session_state.confirmed_keywords)}\n"
-        if st.session_state.english_keywords:
-            full_report += f"研究關鍵字（英文）：{', '.join(st.session_state.english_keywords.values())}\n"
+        full_report += f"研究關鍵字（中文）：{', '.join(st.session_state.zh_keywords)}\n"
+        if st.session_state.en_keywords:
+            full_report += f"研究關鍵字（英文）：{', '.join(st.session_state.en_keywords)}\n"
         full_report += "\n---\n\n"
         
         full_report += "# PART 1: 市場意圖分析\n\n"
