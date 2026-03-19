@@ -1,0 +1,5 @@
+streamlit>=1.23.0
+pandas
+google-api-python-client
+google-generativeai
+youtube-transcript-api
