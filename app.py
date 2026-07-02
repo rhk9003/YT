@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 import json
+import re
 import google.generativeai as genai
 from googleapiclient.discovery import build
 import concurrent.futures
@@ -168,8 +169,8 @@ with st.sidebar:
     step1_intent_done = "intent_three_layers" in st.session_state and st.session_state.intent_three_layers
     st.markdown(f"{'✅' if step1_done else '⬜'} STEP 1: 搜尋與三層意圖分析")
     if step1_intent_done:
-        layers_done = sum(1 for k in ['layer1', 'layer2', 'layer3'] if st.session_state.intent_three_layers.get(k))
-        st.caption(f"  └ 已完成 {layers_done}/3 層分析")
+        layers_done = sum(1 for k in ['layer1', 'layer2', 'layer3', 'synthesis'] if st.session_state.intent_three_layers.get(k))
+        st.caption(f"  └ 已完成 {layers_done}/4 步分析（含洞察引擎）")
     st.markdown(f"{'✅' if step2_done else '⬜'} STEP 2: AI 爬取影片內容")
     st.markdown(f"{'✅' if step3_done else '⬜'} STEP 3: 策略模組分析")
 
@@ -249,6 +250,41 @@ def collect_video_tags(videos):
             if t:
                 counter[t] += 1
     return counter
+
+def parse_iso_duration(duration_str):
+    """將 ISO 8601 時長 (PT12M34S) 轉為分鐘數"""
+    m = re.match(r'PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?', duration_str or '')
+    if not m:
+        return 0
+    h, mi, s = (int(g) if g else 0 for g in m.groups())
+    return round(h * 60 + mi + s / 60, 1)
+
+def video_age_days(publish_time):
+    """影片上架至今的天數（最小 1）"""
+    try:
+        dt = datetime.strptime(publish_time[:10], '%Y-%m-%d')
+        return max((datetime.now() - dt).days, 1)
+    except Exception:
+        return 0
+
+def fetch_channel_stats(api_key, channel_ids):
+    """批次查詢頻道訂閱數，回傳 {channel_id: subscriber_count}。訂閱數是偵測「小蝦米打大鯨魚」異常的關鍵訊號"""
+    stats = {}
+    ids = [c for c in set(channel_ids) if c]
+    if not ids:
+        return stats
+    try:
+        youtube = build('youtube', 'v3', developerKey=api_key)
+        for i in range(0, len(ids), 50):
+            resp = youtube.channels().list(
+                part='statistics',
+                id=','.join(ids[i:i + 50])
+            ).execute()
+            for item in resp.get('items', []):
+                stats[item['id']] = int(item['statistics'].get('subscriberCount', 0))
+    except Exception:
+        pass
+    return stats
 
 def get_youtube_suggestions_deep(keyword, lang="zh-TW", depth=2):
     """遞迴展開 YouTube 自動完成關鍵字，回傳 {depth_level: [suggestions]}"""
@@ -342,7 +378,7 @@ def search_youtube_api(api_key, query, max_results=5, region_code="TW", relevanc
         rank_map = {vid: idx + 1 for idx, vid in enumerate(video_ids)}
 
         stats_response = youtube.videos().list(
-            part='snippet,statistics',
+            part='snippet,statistics,contentDetails',
             id=','.join(video_ids)
         ).execute()
 
@@ -355,7 +391,11 @@ def search_youtube_api(api_key, query, max_results=5, region_code="TW", relevanc
                 'tags': item['snippet'].get('tags', []),
                 'channel': item['snippet']['channelTitle'],
                 'publish_time': item['snippet']['publishedAt'],
+                'channel_id': item['snippet'].get('channelId', ''),
                 'view_count': int(item['statistics'].get('viewCount', 0)),
+                'like_count': int(item['statistics'].get('likeCount', 0)),
+                'comment_count': int(item['statistics'].get('commentCount', 0)),
+                'duration_min': parse_iso_duration(item.get('contentDetails', {}).get('duration', '')),
                 'thumbnail': item['snippet']['thumbnails']['high']['url'],
                 'url': f"https://www.youtube.com/watch?v={item['id']}",
                 'source_keyword': query,
@@ -393,12 +433,12 @@ def search_multiple_keywords(api_key, keywords_list, max_results_per_keyword, la
     
     return all_results
 
-def fetch_top_comments(youtube_api_key, video_id, max_results=20):
-    """抓取單支影片的熱門留言"""
+def fetch_top_comments(youtube_api_key, video_id, max_results=50):
+    """抓取單支影片的熱門留言（含回覆串——留言區的爭論是最有價值的分歧訊號）"""
     try:
         youtube = build('youtube', 'v3', developerKey=youtube_api_key)
         response = youtube.commentThreads().list(
-            part='snippet',
+            part='snippet,replies',
             videoId=video_id,
             order='relevance',
             maxResults=max_results,
@@ -412,7 +452,17 @@ def fetch_top_comments(youtube_api_key, video_id, max_results=20):
                 'text': snippet['textDisplay'],
                 'likes': snippet.get('likeCount', 0),
                 'author': snippet.get('authorDisplayName', ''),
+                'is_reply': False,
             })
+            # 回覆緊跟在母留言後面，保留對話脈絡
+            for reply in item.get('replies', {}).get('comments', [])[:3]:
+                rs = reply['snippet']
+                comments.append({
+                    'text': rs['textDisplay'],
+                    'likes': rs.get('likeCount', 0),
+                    'author': rs.get('authorDisplayName', ''),
+                    'is_reply': True,
+                })
         return comments
     except Exception:
         return []
@@ -617,7 +667,7 @@ def analyze_intent_three_layers(api_key, zh_keywords, en_keywords, zh_videos, en
     tags_text = ", ".join(f"{t}(×{c})" for t, c in tag_counter.most_common(40))
 
     layer1_prompt = f"""
-    你是搜尋意圖分析專家。
+    你是搜尋需求分析專家。你的任務不是分類整理資料，而是從資料中找出「反差與異常」。
 
     以下是使用者輸入的關鍵字，以及從 YouTube 自動完成功能遞迴展開得到的所有長尾搜尋詞（第1層是直接建議，第2層是從第1層再展開的結果）：
 
@@ -629,14 +679,16 @@ def analyze_intent_three_layers(api_key, zh_keywords, en_keywords, zh_videos, en
     {'以下是搜尋結果中競品影片創作者自填的 Tags（出現次數越多代表整個賽道越依賴這個詞）：' if tags_text else ''}
     {tags_text}
 
-    請分析：
-    1. 這些長尾詞可以歸納成哪幾種「搜尋意圖類型」？（例如：教學需求、工具比較、問題解決、購買決策…）
-    2. 每種意圖類型下，最有代表性的搜尋詞是哪些？
-    3. 哪種意圖類型的搜尋詞數量最多？（代表最大的需求方向）
-    4. 有沒有出乎意料的長尾詞？可能暗示什麼冷門但有價值的需求？
-    5. 綜合相關性分數與 Tags 出現頻率，哪些詞是「需求強但競品標題還沒大量使用」的機會詞？
+    只回答以下問題，每一條結論都必須引用具體的搜尋詞：
 
-    請用繁體中文回答，格式清晰。
+    1. 【矛盾訊號】哪些相關性分數高的搜尋詞，彼此的需求方向互相矛盾或照理不該同時出現？這暗示什麼還沒被理解的需求？
+    2. 【卡點詞】哪些詞暗示使用者卡在某個具體步驟、或遇到某個具體問題？（卡點是最強的內容鉤子）
+    3. 【無主流講法的需求】探針逼出的詞裡，哪些方向的搜尋需求明顯存在（分數高），但還沒形成主流頭部詞、競品 Tags 也沒在用？
+    4. 【意料之外】哪些詞是「不看資料想不到有人會這樣搜」的？它暗示什麼被忽略的族群、情境或動機？
+
+    禁止：意圖分類表、資料的描述性總結、不看資料也寫得出來的結論。找不到某類異常就直說「未觀察到」，不要硬湊。
+
+    請用繁體中文回答。
     """
 
     try:
@@ -645,7 +697,22 @@ def analyze_intent_three_layers(api_key, zh_keywords, en_keywords, zh_videos, en
     except Exception as e:
         results['layer1'] = f"❌ 第一層分析失敗: {str(e)}"
 
-    # ── 第二層：排名順序語意分析 ──
+    # ── 第二層：供需錯位偵測 ──
+    def _video_line(v):
+        views = v.get('view_count', 0)
+        age = video_age_days(v.get('publish_time', ''))
+        vpd = views / age if age else 0
+        er = (v.get('like_count', 0) + v.get('comment_count', 0)) / views if views else 0
+        subs = v.get('subscriber_count', 0)
+        dur = v.get('duration_min', 0)
+        line = f"  #{v.get('rank', '?')} {v['title']}\n"
+        line += (f"     頻道：{v['channel']}（訂閱 {subs:,}）| 觀看 {views:,}（日均 {vpd:,.0f}）"
+                 f"| 互動率 {er:.2%} | 上架 {age} 天前 | 片長 {dur} 分\n")
+        if v.get('description'):
+            desc_preview = v['description'][:100].replace('\n', ' ')
+            line += f"     描述：{desc_preview}\n"
+        return line
+
     ranked_text = ""
     all_keywords = zh_keywords + (en_keywords if en_keywords else [])
     all_videos = zh_videos + en_videos
@@ -657,25 +724,26 @@ def analyze_intent_three_layers(api_key, zh_keywords, en_keywords, zh_videos, en
             market_tag = "🇺🇸" if kw in (en_keywords or []) else "🇹🇼"
             ranked_text += f"\n【{market_tag} {kw}】\n"
             for v in kw_videos:
-                ranked_text += f"  #{v.get('rank', '?')} {v['title']} ({v['channel']}, {v['view_count']:,} 觀看)\n"
-                if v.get('description'):
-                    desc_preview = v['description'][:150].replace('\n', ' ')
-                    ranked_text += f"     描述：{desc_preview}\n"
+                ranked_text += _video_line(v)
 
     layer2_prompt = f"""
-    你是 YouTube 搜尋排名分析專家。
-
-    以下是各關鍵字的 YouTube 搜尋結果，按照 YouTube 演算法的相關性排名排列（#1 = YouTube 認為最符合該搜尋意圖的影片）：
+    你是 YouTube 供需錯位分析專家。以下是各關鍵字的搜尋結果，按演算法排名排列（#1 = YouTube 認為最符合搜尋意圖），附完整數據。
+    你的任務是偵測「異常」，不是描述前三名在講什麼。
 
     {ranked_text}
 
-    請分析：
-    1. **主要意圖**：每個關鍵字排名前 3 的影片有什麼共同點？YouTube 認為搜這個詞的人最想看什麼？
-    2. **次要意圖**：排名 4 以後出現但前 3 沒有的主題，代表什麼次要需求？
-    3. **平台偏好**：YouTube 演算法偏好推薦什麼類型的內容？（教學 vs 評測 vs 娛樂 vs…）
-    4. **中英差異**：如果有中英文搜尋結果，兩邊排名前 3 的內容方向有什麼不同？
+    請偵測以下四種異常，每一種都要指出具體的關鍵字與影片名稱；沒觀察到就直說「未觀察到」，不要硬湊：
 
-    請用繁體中文回答，格式清晰。
+    1. 【小蝦米打大鯨魚】訂閱數明顯較小的頻道，排在大頻道前面的關鍵字 → 代表這個詞的需求真實存在、演算法在主動找答案，新頻道可切入。列出這些關鍵字並排出優先順序。
+    2. 【過時的前排】排名前列但上架已久、日均觀看明顯衰退的影片 → 「等人做新版」的機會。指出哪些關鍵字的前排最老舊。
+    3. 【高觀看低互動】觀看數高、但互動率明顯低於同關鍵字其他影片 → 觀眾點進去了但不滿足，標題的承諾沒有兌現。指出是哪支影片、可能沒兌現什麼。
+    4. 【同質化前排】前排標題角度高度雷同的關鍵字 → 說出雷同的角度具體是什麼，以及旁邊空著的差異化角度是什麼。
+
+    最後回答：綜合以上異常，哪 1-2 個關鍵字是「供需錯位最嚴重」＝最值得優先做的？理由是什麼？
+
+    禁止：逐一描述影片內容、複述資料、給「做出差異化」這類不看資料也寫得出來的建議。
+
+    請用繁體中文回答。
     """
 
     try:
@@ -684,31 +752,33 @@ def analyze_intent_three_layers(api_key, zh_keywords, en_keywords, zh_videos, en
     except Exception as e:
         results['layer2'] = f"❌ 第二層分析失敗: {str(e)}"
 
-    # ── 第三層：熱門留言需求挖掘 ──
+    # ── 第三層：承諾與兌現的落差 ──
     comments_text = ""
     for vid, data in video_comments.items():
         if data['comments']:
-            comments_text += f"\n【{data['keyword']}】{data['title']}\n"
-            for c in data['comments'][:15]:
+            comments_text += f"\n【{data['keyword']}】影片標題（＝對觀眾的承諾）：{data['title']}\n"
+            for c in data['comments'][:30]:
+                prefix = "    ↳ " if c.get('is_reply') else "  - "
                 likes_tag = f" (👍{c['likes']})" if c['likes'] > 0 else ""
-                comments_text += f"  - {c['text'][:200]}{likes_tag}\n"
+                comments_text += f"{prefix}{c['text'][:300]}{likes_tag}\n"
 
     if comments_text:
         layer3_prompt = f"""
-        你是觀眾行為分析專家。
-
-        以下是各關鍵字排名前幾支影片的熱門留言（按讚數越高代表越多人認同）：
+        你是觀眾落差分析專家。以下是各影片的「標題（＝影片對觀眾的承諾）」與其熱門留言（＝觀眾實際的反應；讚數＝認同這則留言的人數；「↳」開頭是回覆，回覆串代表觀眾之間的對話與爭論）：
 
         {comments_text}
 
-        請分析：
-        1. **觀眾追問最多的問題**：留言中反覆出現的疑問或請求是什麼？
-        2. **未被滿足的需求**：觀眾明確提到「希望講」「沒有提到」「想知道」的內容
-        3. **爭議與分歧**：觀眾之間意見不同的點是什麼？（高互動潛力的切入角度）
-        4. **情緒訊號**：觀眾對這個主題的態度是偏正面、焦慮、困惑、還是興奮？
-        5. **隱藏的內容機會**：從留言中挖掘出的、影片創作者可能沒意識到的需求
+        只回答以下問題，每一條結論都必須引用留言原文（可節錄）：
 
-        請用繁體中文回答，格式清晰。
+        1. 【承諾 vs 兌現】哪些影片的留言顯示觀眾沒有得到標題承諾的東西？具體落差是什麼？
+        2. 【集體性未滿足需求】被大量點讚的抱怨、追問、許願是什麼？（這是全部資料中最接近「現成影片題材」的訊號）列出並附上讚數。
+        3. 【爭論點】回覆串裡觀眾意見分歧的地方在哪？各方立場是什麼？（分歧＝高互動潛力的切入角度）
+        4. 【觀眾的語言 vs 創作者的語言】觀眾描述問題時的用詞，和影片標題的用詞有什麼落差？觀眾的講法才是未來的搜尋詞，把它們列出來。
+        5. 【意料之外的使用情境】留言中透露的、創作者顯然沒設想到的使用場景或族群是什麼？
+
+        禁止：情緒比例統計、「觀眾希望更深入」這類籠統結論、沒有留言原文支撐的判斷。找不到就直說「未觀察到」。
+
+        請用繁體中文回答。
         """
 
         try:
@@ -718,6 +788,38 @@ def analyze_intent_three_layers(api_key, zh_keywords, en_keywords, zh_videos, en
             results['layer3'] = f"❌ 第三層分析失敗: {str(e)}"
     else:
         results['layer3'] = "⚠️ 未抓取到留言資料，無法進行第三層分析。可能原因：影片關閉留言功能，或 API 配額不足。"
+
+    # ── 第四步：洞察引擎（三層對撞）──
+    synthesis_prompt = f"""
+    你是內容策略洞察總監。以下是針對同一批關鍵字的三份分析——需求端（搜尋詞異常）、供給端（排名供需錯位）、反應端（觀眾落差）：
+
+    【需求端分析】
+    {results.get('layer1', '（無）')}
+
+    【供給端分析】
+    {results.get('layer2', '（無）')}
+
+    【反應端分析】
+    {results.get('layer3', '（無）')}
+
+    把三份分析互相對撞，輸出 5-7 條洞察。每條格式固定：
+
+    ### 💡 洞察 N：（一句話，說出一個非顯而易見的判斷）
+    - **來自哪個反差**：哪兩個（或以上）資料源的訊號相減得出這個判斷
+    - **行動意義**：具體做什麼題目、用什麼關鍵字、切什麼角度
+
+    收錄門檻：這條判斷必須是「不對撞資料就想不到」的。三個資料源都指向同一方向的機會，排在最前面。
+
+    禁止：把單一層的結論換句話說、常識性建議（如「做出差異化」「提供價值」「了解你的觀眾」）。寧可只輸出 3 條真洞察，也不要湊滿 7 條。
+
+    請用繁體中文回答。
+    """
+
+    try:
+        resp4 = model.generate_content(synthesis_prompt)
+        results['synthesis'] = resp4.text
+    except Exception as e:
+        results['synthesis'] = f"❌ 洞察引擎失敗: {str(e)}"
 
     return results
 
@@ -972,7 +1074,7 @@ def generate_all_analyses_md(video_analyses):
 # ==========================================
 
 st.title("🎯 YouTube 戰略內容切入分析儀 v3")
-st.caption("多關鍵字搜尋 → 三層意圖分析（長尾詞／排名語意／留言需求）→ 關鍵字擴充總表（五來源整併）→ AI 爬取字幕 → 模組化策略生成")
+st.caption("多關鍵字搜尋 → 意圖分析（需求端／供給端／觀眾落差 → 💡洞察引擎）→ 關鍵字擴充總表（五來源整併）→ AI 爬取字幕 → 模組化策略生成")
 
 # Session State 初始化
 if "zh_keywords" not in st.session_state:
@@ -1388,6 +1490,16 @@ with st.container(border=True):
                             lang="en"
                         )
 
+                # 查頻道訂閱數（供第二層「小蝦米打大鯨魚」異常偵測）
+                if zh_results or en_results:
+                    with st.spinner("正在查詢頻道訂閱數..."):
+                        channel_stats = fetch_channel_stats(
+                            YOUTUBE_API_KEY,
+                            [v.get('channel_id', '') for v in zh_results + en_results]
+                        )
+                        for v in zh_results + en_results:
+                            v['subscriber_count'] = channel_stats.get(v.get('channel_id', ''), 0)
+
                 st.session_state.search_results = {'zh': zh_results, 'en': en_results}
                 st.session_state.video_analyses = {'zh': [], 'en': []}
                 st.session_state.strategy_results = {}
@@ -1423,8 +1535,8 @@ with st.container(border=True):
                                 if kw not in st.session_state.probe_suggestions_en:
                                     st.session_state.probe_suggestions_en[kw] = probe_youtube_suggestions(kw, lang="en", market="en")
 
-                    # 抓取前 3 名影片的熱門留言
-                    with st.spinner("正在抓取排名前 3 影片的熱門留言..."):
+                    # 抓取前 5 名影片的熱門留言（含回覆串）
+                    with st.spinner("正在抓取排名前 5 影片的熱門留言（含回覆串）..."):
                         videos_by_keyword = {}
                         for v in zh_results + en_results:
                             kw = v.get('source_keyword', '')
@@ -1435,13 +1547,13 @@ with st.container(border=True):
                         comments = batch_fetch_comments(
                             YOUTUBE_API_KEY,
                             videos_by_keyword,
-                            top_n=3,
-                            max_per_video=20
+                            top_n=5,
+                            max_per_video=50
                         )
                         st.session_state.video_comments = comments
 
-                    # 三層意圖分析
-                    with st.spinner("正在執行三層意圖分析（長尾詞 → 排名語意 → 留言需求）..."):
+                    # 三層對撞意圖分析 + 洞察引擎
+                    with st.spinner("正在執行意圖分析（需求端 → 供給端 → 觀眾落差 → 洞察對撞）..."):
                         en_kws = st.session_state.en_keywords if ENABLE_ENGLISH else []
                         three_layers = analyze_intent_three_layers(
                             GEMINI_API_KEY,
@@ -1474,15 +1586,16 @@ with st.container(border=True):
 # 顯示三層意圖分析結果
 if st.session_state.intent_three_layers:
     with st.container(border=True):
-        st.subheader("📊 三層意圖分析報告")
+        st.subheader("📊 意圖分析報告（三層對撞 → 洞察）")
 
         layer_tabs = st.tabs([
-            "🔍 第一層：長尾詞意圖分群",
-            "📊 第二層：排名語意分析",
-            "💬 第三層：留言需求挖掘"
+            "💡 洞察引擎（三層對撞）",
+            "🔍 需求端：搜尋詞異常",
+            "📊 供給端：供需錯位",
+            "💬 反應端：觀眾落差"
         ])
 
-        layer_keys = ['layer1', 'layer2', 'layer3']
+        layer_keys = ['synthesis', 'layer1', 'layer2', 'layer3']
         for tab, key in zip(layer_tabs, layer_keys):
             with tab:
                 content = st.session_state.intent_three_layers.get(key, "尚未分析")
@@ -1495,11 +1608,13 @@ if st.session_state.intent_three_layers:
         if st.session_state.en_keywords:
             combined_report += f"研究關鍵字（英文）：{', '.join(st.session_state.en_keywords)}\n"
         combined_report += "\n---\n\n"
-        combined_report += "## 第一層：長尾詞意圖分群\n\n"
+        combined_report += "## 💡 洞察引擎（三層對撞）\n\n"
+        combined_report += st.session_state.intent_three_layers.get('synthesis', '') + "\n\n---\n\n"
+        combined_report += "## 需求端：搜尋詞異常\n\n"
         combined_report += st.session_state.intent_three_layers.get('layer1', '') + "\n\n---\n\n"
-        combined_report += "## 第二層：排名語意分析\n\n"
+        combined_report += "## 供給端：供需錯位\n\n"
         combined_report += st.session_state.intent_three_layers.get('layer2', '') + "\n\n---\n\n"
-        combined_report += "## 第三層：留言需求挖掘\n\n"
+        combined_report += "## 反應端：觀眾落差\n\n"
         combined_report += st.session_state.intent_three_layers.get('layer3', '') + "\n\n"
 
         st.download_button(
@@ -1884,13 +1999,15 @@ if st.session_state.strategy_results:
             full_report += f"研究關鍵字（英文）：{', '.join(st.session_state.en_keywords)}\n"
         full_report += "\n---\n\n"
         
-        full_report += "# PART 1: 三層意圖分析\n\n"
+        full_report += "# PART 1: 意圖分析（三層對撞 → 洞察）\n\n"
         if st.session_state.intent_three_layers:
-            full_report += "## 第一層：長尾詞意圖分群\n\n"
+            full_report += "## 💡 洞察引擎（三層對撞）\n\n"
+            full_report += st.session_state.intent_three_layers.get('synthesis', '') + "\n\n---\n\n"
+            full_report += "## 需求端：搜尋詞異常\n\n"
             full_report += st.session_state.intent_three_layers.get('layer1', '') + "\n\n---\n\n"
-            full_report += "## 第二層：排名語意分析\n\n"
+            full_report += "## 供給端：供需錯位\n\n"
             full_report += st.session_state.intent_three_layers.get('layer2', '') + "\n\n---\n\n"
-            full_report += "## 第三層：留言需求挖掘\n\n"
+            full_report += "## 反應端：觀眾落差\n\n"
             full_report += st.session_state.intent_three_layers.get('layer3', '') + "\n\n"
         elif st.session_state.intent_analysis:
             full_report += st.session_state.intent_analysis + "\n\n"
