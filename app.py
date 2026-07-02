@@ -1,8 +1,11 @@
 import streamlit as st
 import requests
+import json
 import google.generativeai as genai
 from googleapiclient.discovery import build
 import concurrent.futures
+import pandas as pd
+from collections import Counter
 from datetime import datetime
 
 # ==========================================
@@ -17,6 +20,18 @@ st.set_page_config(
 
 # 固定爬字幕用的模型（低成本）
 TRANSCRIPT_MODEL = "gemini-2.5-flash"
+
+# 修飾詞探針：逼出 autocomplete 平常不會主動給的決策階段／疑慮類長尾詞
+PROBE_WORDS = {
+    "zh": {
+        "suffix": ["教學", "怎麼用", "推薦", "比較", "開箱", "實測", "新手", "免費", "缺點"],
+        "prefix": ["怎麼"],
+    },
+    "en": {
+        "suffix": ["tutorial", "vs", "review", "for beginners", "free"],
+        "prefix": ["how to", "best"],
+    },
+}
 
 # 策略模組定義
 STRATEGY_MODULES = {
@@ -180,6 +195,61 @@ def get_youtube_suggestions(keyword, lang="zh-TW"):
     except Exception:
         return []
 
+def get_youtube_suggestions_with_scores(keyword, lang="zh-TW"):
+    """抓取 YouTube 自動完成關鍵字與 Google 相關性分數，回傳 [(term, score), ...]，分數越高需求越強"""
+    try:
+        url = "http://suggestqueries.google.com/complete/search"
+        params = {
+            "client": "chrome",
+            "ds": "yt",
+            "q": keyword,
+            "hl": lang
+        }
+        response = requests.get(url, params=params, timeout=2)
+        response.encoding = "utf-8"
+        data = response.json()
+        terms = data[1] if len(data) > 1 else []
+        meta = data[4] if len(data) > 4 and isinstance(data[4], dict) else {}
+        scores = meta.get("google:suggestrelevance", [])
+        if terms:
+            return [(t, scores[i] if i < len(scores) else 0) for i, t in enumerate(terms)]
+    except Exception:
+        pass
+    # chrome client 解析失敗時退回 firefox client（無分數）
+    return [(t, 0) for t in get_youtube_suggestions(keyword, lang)]
+
+def probe_youtube_suggestions(keyword, lang="zh-TW", market="zh"):
+    """用修飾詞探針打 YouTube suggest，挖出決策階段／疑慮類長尾詞。回傳 {probe_query: [(term, score), ...]}"""
+    probes = PROBE_WORDS.get(market, PROBE_WORDS["zh"])
+    queries = [f"{keyword} {p}" for p in probes.get("suffix", [])]
+    queries += [f"{p} {keyword}" for p in probes.get("prefix", [])]
+
+    results = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+        future_to_q = {
+            executor.submit(get_youtube_suggestions_with_scores, q, lang): q
+            for q in queries
+        }
+        for future in concurrent.futures.as_completed(future_to_q):
+            q = future_to_q[future]
+            try:
+                scored = future.result()
+                if scored:
+                    results[q] = scored[:10]
+            except Exception:
+                pass
+    return results
+
+def collect_video_tags(videos):
+    """收集競品影片的 tags（創作者自填的 SEO 關鍵字），回傳出現頻率 Counter"""
+    counter = Counter()
+    for v in videos or []:
+        for t in v.get('tags', []):
+            t = t.strip().lower()
+            if t:
+                counter[t] += 1
+    return counter
+
 def get_youtube_suggestions_deep(keyword, lang="zh-TW", depth=2):
     """遞迴展開 YouTube 自動完成關鍵字，回傳 {depth_level: [suggestions]}"""
     results = {}
@@ -282,6 +352,7 @@ def search_youtube_api(api_key, query, max_results=5, region_code="TW", relevanc
                 'id': item['id'],
                 'title': item['snippet']['title'],
                 'description': item['snippet']['description'],
+                'tags': item['snippet'].get('tags', []),
                 'channel': item['snippet']['channelTitle'],
                 'publish_time': item['snippet']['publishedAt'],
                 'view_count': int(item['statistics'].get('viewCount', 0)),
@@ -514,7 +585,8 @@ def analyze_search_intent_bilingual(api_key, zh_keywords, en_keywords, zh_videos
 
 def analyze_intent_three_layers(api_key, zh_keywords, en_keywords, zh_videos, en_videos,
                                  deep_suggestions_zh, deep_suggestions_en,
-                                 video_comments, model_version):
+                                 video_comments, model_version,
+                                 probe_suggestions_zh=None, probe_suggestions_en=None):
     """三層意圖分析：長尾詞分群 → 排名語意 → 留言需求"""
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(model_version)
@@ -532,6 +604,18 @@ def analyze_intent_three_layers(api_key, zh_keywords, en_keywords, zh_videos, en
             for depth, terms in layers.items():
                 suggestions_text += f"  第{depth}層展開：{', '.join(terms[:20])}\n"
 
+    # 修飾詞探針結果（含 Google 相關性分數）
+    probe_text = ""
+    for probes in (probe_suggestions_zh or {}, probe_suggestions_en or {}):
+        for kw, probe_map in probes.items():
+            for q, scored in probe_map.items():
+                terms = ", ".join(f"{t}({s})" for t, s in scored[:10])
+                probe_text += f"  「{q}」→ {terms}\n"
+
+    # 競品影片 tags（創作者自填關鍵字）
+    tag_counter = collect_video_tags(zh_videos + en_videos)
+    tags_text = ", ".join(f"{t}(×{c})" for t, c in tag_counter.most_common(40))
+
     layer1_prompt = f"""
     你是搜尋意圖分析專家。
 
@@ -539,11 +623,18 @@ def analyze_intent_three_layers(api_key, zh_keywords, en_keywords, zh_videos, en
 
     {suggestions_text}
 
+    {'以下是用修飾詞探針（教學/推薦/比較/缺點…）逼出的長尾詞，括號內為 Google 相關性分數，分數越高代表需求越強：' if probe_text else ''}
+    {probe_text}
+
+    {'以下是搜尋結果中競品影片創作者自填的 Tags（出現次數越多代表整個賽道越依賴這個詞）：' if tags_text else ''}
+    {tags_text}
+
     請分析：
     1. 這些長尾詞可以歸納成哪幾種「搜尋意圖類型」？（例如：教學需求、工具比較、問題解決、購買決策…）
     2. 每種意圖類型下，最有代表性的搜尋詞是哪些？
     3. 哪種意圖類型的搜尋詞數量最多？（代表最大的需求方向）
     4. 有沒有出乎意料的長尾詞？可能暗示什麼冷門但有價值的需求？
+    5. 綜合相關性分數與 Tags 出現頻率，哪些詞是「需求強但競品標題還沒大量使用」的機會詞？
 
     請用繁體中文回答，格式清晰。
     """
@@ -629,6 +720,111 @@ def analyze_intent_three_layers(api_key, zh_keywords, en_keywords, zh_videos, en
         results['layer3'] = "⚠️ 未抓取到留言資料，無法進行第三層分析。可能原因：影片關閉留言功能，或 API 配額不足。"
 
     return results
+
+def generate_keyword_master_table(api_key, model_version, zh_keywords, en_keywords,
+                                   deep_zh, deep_en, probes_zh, probes_en,
+                                   tag_counter, titles, video_comments):
+    """整併五種 YouTube 原生來源，生成結構化關鍵字總表（list of dict）"""
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(model_version)
+
+    seeds = zh_keywords + en_keywords
+    material = f"【種子關鍵字】{', '.join(seeds)}\n"
+
+    def fmt_deep(deep, label):
+        text = ""
+        for kw, layers in deep.items():
+            terms = layers.get(1, []) + layers.get(2, [])
+            if terms:
+                text += f"  {kw}: {', '.join(terms[:30])}\n"
+        return f"\n【來源1: YouTube 自動完成{label}】\n{text}" if text else ""
+
+    material += fmt_deep(deep_zh, "（中文）")
+    material += fmt_deep(deep_en, "（英文）")
+
+    def fmt_probes(probes, label):
+        text = ""
+        for kw, probe_map in probes.items():
+            for q, scored in probe_map.items():
+                terms = ", ".join(f"{t}({s})" for t, s in scored)
+                text += f"  「{q}」→ {terms}\n"
+        return f"\n【來源2: 修飾詞探針{label}，括號內為 Google 相關性分數，越高需求越強】\n{text}" if text else ""
+
+    material += fmt_probes(probes_zh, "（中文）")
+    material += fmt_probes(probes_en, "（英文）")
+
+    if tag_counter:
+        top_tags = tag_counter.most_common(50)
+        material += "\n【來源3: 競品影片 Tags（創作者自填的 SEO 關鍵字，×N 為出現次數）】\n"
+        material += ", ".join(f"{t}(×{c})" for t, c in top_tags) + "\n"
+
+    if titles:
+        material += "\n【來源4: 競品影片標題】\n"
+        for t in titles[:60]:
+            material += f"  - {t}\n"
+
+    comment_lines = []
+    for vid, data in (video_comments or {}).items():
+        for c in data.get('comments', [])[:10]:
+            text = c['text'][:100].replace('\n', ' ')
+            comment_lines.append(text)
+    if comment_lines:
+        material += "\n【來源5: 觀眾熱門留言（用來抽取觀眾實際用語）】\n"
+        for line in comment_lines[:100]:
+            material += f"  - {line}\n"
+
+    prompt = f"""
+你是 YouTube 關鍵字研究專家。以下是從多個 YouTube 原生資料來源收集到的原始素材：
+
+{material}
+
+請整併成一份「可直接拿去做內容企劃／搜尋研究」的關鍵字總表：
+
+1. 合併重複與同義變形，保留最接近真實搜尋用語的版本
+2. 從競品標題中抽出反覆出現的高頻詞組（例如「零基礎」「5分鐘學會」這類），作為關鍵字加入
+3. 從觀眾留言中抽出觀眾實際使用、但創作者標題較少用的講法，作為關鍵字加入
+4. 排除種子關鍵字本身，只保留新發現
+5. 每個關鍵字給出：
+   - market: "zh"（中文詞）或 "en"（英文詞）
+   - intent: 教學需求 / 比較評估 / 問題解決 / 購買決策 / 靈感娛樂 / 其他
+   - sources: 來源列表，值限 "autocomplete" / "probe" / "tags" / "title" / "comment"，可多個（跨來源交叉出現代表需求更可信）
+   - demand: 需求強度 1-5 的整數（綜合相關性分數、出現頻率、跨來源出現情況）
+   - note: 一句話說明這個詞代表的需求或適合的使用時機
+6. 按 demand 由高到低排序，最多輸出 60 個
+
+直接輸出 JSON 陣列，不要其他文字。格式範例：
+[{{"keyword": "...", "market": "zh", "intent": "教學需求", "sources": ["autocomplete", "probe"], "demand": 5, "note": "..."}}]
+"""
+
+    response = model.generate_content(
+        prompt,
+        generation_config={"response_mime_type": "application/json"}
+    )
+    text = response.text.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.startswith("json"):
+            text = text[4:]
+    rows = json.loads(text)
+
+    table = []
+    for r in rows:
+        if not isinstance(r, dict) or not str(r.get('keyword', '')).strip():
+            continue
+        try:
+            demand = int(r.get('demand', 3))
+        except (TypeError, ValueError):
+            demand = 3
+        table.append({
+            'keyword': str(r['keyword']).strip(),
+            'market': r.get('market') if r.get('market') in ('zh', 'en') else 'zh',
+            'intent': r.get('intent', '其他'),
+            'sources': ', '.join(r['sources']) if isinstance(r.get('sources'), list) else str(r.get('sources', '')),
+            'demand': demand,
+            'note': r.get('note', ''),
+        })
+    table.sort(key=lambda x: -x['demand'])
+    return table
 
 def generate_strategy_module(api_key, module_key, all_analyses, keywords_info, user_goal, model_version, has_english=False):
     """生成單一策略模組的報告"""
@@ -776,7 +972,7 @@ def generate_all_analyses_md(video_analyses):
 # ==========================================
 
 st.title("🎯 YouTube 戰略內容切入分析儀 v3")
-st.caption("多關鍵字搜尋 → 三層意圖分析（長尾詞／排名語意／留言需求）→ AI 爬取字幕 → 模組化策略生成")
+st.caption("多關鍵字搜尋 → 三層意圖分析（長尾詞／排名語意／留言需求）→ 關鍵字擴充總表（五來源整併）→ AI 爬取字幕 → 模組化策略生成")
 
 # Session State 初始化
 if "zh_keywords" not in st.session_state:
@@ -797,6 +993,12 @@ if "deep_suggestions_zh" not in st.session_state:
     st.session_state.deep_suggestions_zh = {}  # {keyword: {1: [...], 2: [...]}}
 if "deep_suggestions_en" not in st.session_state:
     st.session_state.deep_suggestions_en = {}
+if "probe_suggestions_zh" not in st.session_state:
+    st.session_state.probe_suggestions_zh = {}  # {keyword: {probe_query: [(term, score)]}}
+if "probe_suggestions_en" not in st.session_state:
+    st.session_state.probe_suggestions_en = {}
+if "keyword_table" not in st.session_state:
+    st.session_state.keyword_table = []  # 關鍵字總表 rows
 if "video_comments" not in st.session_state:
     st.session_state.video_comments = {}  # {video_id: {title, keyword, comments}}
 if "video_analyses" not in st.session_state:
@@ -1210,6 +1412,17 @@ with st.container(border=True):
                                     all_sug = deep.get(1, []) + deep.get(2, [])
                                     st.session_state.en_suggestions_cache[kw] = all_sug
 
+                    # 修飾詞探針（供意圖分析與關鍵字總表使用）
+                    with st.spinner("正在執行修飾詞探針（教學/推薦/比較/缺點…）..."):
+                        if has_zh:
+                            for kw in st.session_state.zh_keywords:
+                                if kw not in st.session_state.probe_suggestions_zh:
+                                    st.session_state.probe_suggestions_zh[kw] = probe_youtube_suggestions(kw, lang="zh-TW", market="zh")
+                        if has_en:
+                            for kw in st.session_state.en_keywords:
+                                if kw not in st.session_state.probe_suggestions_en:
+                                    st.session_state.probe_suggestions_en[kw] = probe_youtube_suggestions(kw, lang="en", market="en")
+
                     # 抓取前 3 名影片的熱門留言
                     with st.spinner("正在抓取排名前 3 影片的熱門留言..."):
                         videos_by_keyword = {}
@@ -1239,7 +1452,9 @@ with st.container(border=True):
                             st.session_state.deep_suggestions_zh,
                             st.session_state.deep_suggestions_en,
                             st.session_state.video_comments,
-                            MODEL_VERSION
+                            MODEL_VERSION,
+                            probe_suggestions_zh=st.session_state.probe_suggestions_zh,
+                            probe_suggestions_en=st.session_state.probe_suggestions_en
                         )
                         st.session_state.intent_three_layers = three_layers
 
@@ -1306,6 +1521,118 @@ elif st.session_state.intent_analysis and not st.session_state.intent_three_laye
             f"intent_analysis_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
             mime="text/markdown"
         )
+
+# ============================================================
+# 關鍵字擴充總表（五來源整併）
+# ============================================================
+if st.session_state.zh_keywords or st.session_state.en_keywords:
+    with st.container(border=True):
+        st.subheader("🧰 關鍵字擴充總表")
+
+        _sr = st.session_state.search_results
+        _all_search_videos = _sr.get('zh', []) + _sr.get('en', [])
+
+        active_sources = ["YouTube 自動完成", "修飾詞探針"]
+        if _all_search_videos:
+            active_sources += ["競品 Tags", "競品標題"]
+        if st.session_state.video_comments:
+            active_sources.append("觀眾留言")
+        st.caption(f"整併來源：{'、'.join(active_sources)} → 去重、意圖分類、需求強度排序的可用關鍵字清單")
+
+        if not _all_search_videos:
+            st.info("💡 現在就能用自動完成＋探針生成總表；先執行 STEP 1 搜尋後再生成，會多納入競品 Tags、標題與留言，結果更完整")
+
+        if st.button("🚀 生成關鍵字總表", type="primary", key="gen_kw_table"):
+            if not GEMINI_API_KEY:
+                st.error("請先設定 Gemini API Key")
+            else:
+                # 補齊 autocomplete 深度展開
+                with st.spinner("正在展開 YouTube 自動完成..."):
+                    for kw in st.session_state.zh_keywords:
+                        if kw not in st.session_state.deep_suggestions_zh:
+                            deep = get_youtube_suggestions_deep(kw, lang="zh-TW", depth=2)
+                            st.session_state.deep_suggestions_zh[kw] = deep
+                            st.session_state.zh_suggestions_cache[kw] = deep.get(1, []) + deep.get(2, [])
+                    for kw in st.session_state.en_keywords:
+                        if kw not in st.session_state.deep_suggestions_en:
+                            deep = get_youtube_suggestions_deep(kw, lang="en", depth=2)
+                            st.session_state.deep_suggestions_en[kw] = deep
+                            st.session_state.en_suggestions_cache[kw] = deep.get(1, []) + deep.get(2, [])
+
+                # 補齊修飾詞探針
+                with st.spinner("正在執行修飾詞探針..."):
+                    for kw in st.session_state.zh_keywords:
+                        if kw not in st.session_state.probe_suggestions_zh:
+                            st.session_state.probe_suggestions_zh[kw] = probe_youtube_suggestions(kw, lang="zh-TW", market="zh")
+                    for kw in st.session_state.en_keywords:
+                        if kw not in st.session_state.probe_suggestions_en:
+                            st.session_state.probe_suggestions_en[kw] = probe_youtube_suggestions(kw, lang="en", market="en")
+
+                with st.spinner("正在整併所有來源，生成關鍵字總表..."):
+                    try:
+                        table = generate_keyword_master_table(
+                            GEMINI_API_KEY,
+                            MODEL_VERSION,
+                            st.session_state.zh_keywords,
+                            st.session_state.en_keywords,
+                            st.session_state.deep_suggestions_zh,
+                            st.session_state.deep_suggestions_en,
+                            st.session_state.probe_suggestions_zh,
+                            st.session_state.probe_suggestions_en,
+                            collect_video_tags(_all_search_videos),
+                            [v['title'] for v in _all_search_videos],
+                            st.session_state.video_comments
+                        )
+                        st.session_state.keyword_table = table
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"生成失敗: {e}")
+
+        if st.session_state.keyword_table:
+            df = pd.DataFrame(st.session_state.keyword_table)
+            df.insert(0, "加入", False)
+
+            edited = st.data_editor(
+                df,
+                hide_index=True,
+                use_container_width=True,
+                disabled=[c for c in df.columns if c != "加入"],
+                column_config={
+                    "加入": st.column_config.CheckboxColumn("加入", help="勾選後可一鍵加入搜尋列表"),
+                    "keyword": st.column_config.TextColumn("關鍵字", width="medium"),
+                    "market": st.column_config.TextColumn("市場"),
+                    "intent": st.column_config.TextColumn("意圖類型"),
+                    "sources": st.column_config.TextColumn("來源", help="跨來源交叉出現的詞，需求更可信"),
+                    "demand": st.column_config.NumberColumn("需求強度"),
+                    "note": st.column_config.TextColumn("說明", width="large"),
+                },
+                key="kw_table_editor"
+            )
+
+            col_add, col_dl = st.columns(2)
+            with col_add:
+                if st.button("➕ 將勾選的關鍵字加入搜尋列表", key="add_selected_kws"):
+                    selected = edited[edited["加入"]]
+                    added = 0
+                    for _, row in selected.iterrows():
+                        target = st.session_state.en_keywords if row["market"] == "en" else st.session_state.zh_keywords
+                        if row["keyword"] not in target:
+                            target.append(row["keyword"])
+                            added += 1
+                    if added:
+                        st.success(f"已加入 {added} 個關鍵字")
+                        st.rerun()
+                    else:
+                        st.info("沒有新的關鍵字可加入（未勾選或已存在）")
+            with col_dl:
+                csv_bytes = df.drop(columns=["加入"]).to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    "📥 下載關鍵字總表 CSV",
+                    csv_bytes,
+                    f"keyword_table_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                    mime="text/csv",
+                    key="dl_kw_table"
+                )
 
 # ============================================================
 # STEP 2: 選擇競品 & AI 爬取
